@@ -1,37 +1,44 @@
-name: DefectDojo Scan (Test Rapido + HTML Fijo)
+name: ZAP API Scan (Auto - Test Mode)
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch:
+    branches:
+      - main
 
 env:
-  MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
-  SOURCE_URL: "https://demo.defectdojo.org/api/v2/oa3/schema/?format=json"
+  MY_TOKEN: 548afd6fab3bea9794a41b31da0e9404f733e222
+  OPENAPI_URL: https://demo.defectdojo.org/api/v2/oa3/schema/?format=json
 
 jobs:
-  zap_scan:
+  zap_api_scan:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Descargar Código
-        uses: actions/checkout@v4
-
-      - name: Preparar directorios
+      - name: Preparar workspace
         run: |
-          mkdir -p ./zap/wrk
-          chmod 777 ./zap/wrk
+          mkdir -p zap/wrk
+          chmod -R 777 zap/wrk
 
-      # 1. Configuración de Auth
-      - name: Crear Configuración ZAP
+      - name: Descargar OpenAPI
         run: |
-          cat <<EOF > ./zap/wrk/zap_options.prop
+          curl -s "$OPENAPI_URL" -o zap/wrk/openapi-full.json
+
+      - name: Limitar OpenAPI a 10 endpoints
+        run: |
+          jq '
+            .paths |= (to_entries | .[:10] | from_entries)
+          ' zap/wrk/openapi-full.json > zap/wrk/openapi-test.json
+
+      - name: Crear configuración ZAP
+        run: |
+          cat <<EOF > zap/wrk/zap_options.prop
           replacer.full_list(0).description=AuthHeader
           replacer.full_list(0).enabled=true
           replacer.full_list(0).matchtype=REQ_HEADER
           replacer.full_list(0).matchstr=Authorization
           replacer.full_list(0).regex=false
           replacer.full_list(0).replacement=Token ${MY_TOKEN}
-          
+
           replacer.full_list(1).description=AcceptJson
           replacer.full_list(1).enabled=true
           replacer.full_list(1).matchtype=REQ_HEADER
@@ -39,51 +46,24 @@ jobs:
           replacer.full_list(1).regex=false
           replacer.full_list(1).replacement=application/json
           EOF
-          chmod 777 ./zap/wrk/zap_options.prop
 
-      # 2. Recortar JSON a 10 URLs
-      - name: Generar Mini-Swagger
+      - name: Ejecutar ZAP API Scan
         run: |
-          # Descargar
-          curl -s -H "Authorization: Token ${MY_TOKEN}" "$SOURCE_URL" > full_schema.json
-          # Recortar
-          jq '.paths |= (to_entries | .[:10] | from_entries)' full_schema.json > ./zap/wrk/mini_schema.json
-          chmod 777 ./zap/wrk/mini_schema.json
-          echo "✅ Mini Swagger creado."
-
-      # 3. EJECUTAR ZAP (Forzando la ruta del reporte)
-      - name: Ejecutar Escaneo ZAP
-        run: |
-          echo "🚀 Iniciando escaneo de 10 URLs..."
-
-          # CAMBIO CLAVE AQUÍ ABAJO 👇
-          # 1. -t /zap/wrk/mini_schema.json (Ruta completa dentro del contenedor)
-          # 2. -r /zap/wrk/reporte-rapido.html (OBLIGAMOS a guardarlo en la carpeta compartida)
-          
           docker run --rm -u 0 \
-              -v $(pwd)/zap/wrk:/zap/wrk:rw \
-              zaproxy/zap-stable zap-api-scan.py \
-              -t /zap/wrk/mini_schema.json \
-              -f openapi \
-              -r /zap/wrk/reporte-rapido.html \
-              -z "-configfile /zap/wrk/zap_options.prop" \
-              2>&1 | tee ./zap/wrk/zap_console.log
+            -v $(pwd)/zap/wrk:/zap/wrk:rw \
+            zaproxy/zap-stable zap-api-scan.py \
+            -t /zap/wrk/openapi-test.json \
+            -f openapi \
+            -r zap-report.html \
+            -z -configfile /zap/wrk/zap_options.prop \
+            > zap/wrk/zap.log 2>&1 || true
 
-      # 4. Verificación (Debugging)
-      - name: ¿Existe el reporte?
-        run: |
-          echo "📂 Contenido de la carpeta ./zap/wrk/ :"
-          ls -la ./zap/wrk/
-          
-          if [ -f "./zap/wrk/reporte-rapido.html" ]; then
-             echo "✅ ¡SÍ! El reporte HTML existe."
-          else
-             echo "❌ El reporte HTML NO se creó."
-          fi
-
-      - name: Subir Reporte HTML
+      - name: Subir artefactos (reporte + logs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-HTML-Final
-          path: ./zap/wrk/reporte-rapido.html # Subimos específicamente el HTML
+          name: zap-api-results
+          path: |
+            zap/wrk/zap-report.html
+            zap/wrk/zap.log
+            zap/wrk/openapi-test.json
