@@ -1,0 +1,86 @@
+name: DefectDojo Full Scan (Producción)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
+  SOURCE_URL: "https://demo.defectdojo.org/api/v2/oa3/schema/?format=json"
+
+jobs:
+  zap_scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar Código
+        uses: actions/checkout@v4
+
+      - name: Preparar directorios
+        run: |
+          mkdir -p ./zap/wrk
+          chmod 777 ./zap/wrk
+
+      # 1. Configuración de Autenticación para ZAP
+      - name: Configurar Auth ZAP
+        run: |
+          cat <<EOF > ./zap/wrk/zap_options.prop
+          replacer.full_list(0).description=AuthHeader
+          replacer.full_list(0).enabled=true
+          replacer.full_list(0).matchtype=REQ_HEADER
+          replacer.full_list(0).matchstr=Authorization
+          replacer.full_list(0).regex=false
+          replacer.full_list(0).replacement=Token ${MY_TOKEN}
+          
+          replacer.full_list(1).description=AcceptJson
+          replacer.full_list(1).enabled=true
+          replacer.full_list(1).matchtype=REQ_HEADER
+          replacer.full_list(1).matchstr=Accept
+          replacer.full_list(1).regex=false
+          replacer.full_list(1).replacement=application/json
+          EOF
+          chmod 777 ./zap/wrk/zap_options.prop
+
+      # 2. Descargar Swagger COMPLETO (Sin recortar con jq)
+      - name: Descargar Swagger (Full)
+        run: |
+          echo "⬇️ Descargando Swagger completo..."
+          
+          # Usamos el modo "Camuflaje" para evitar bloqueo 403
+          curl -s -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            -H "Authorization: Token ${MY_TOKEN}" \
+            "$SOURCE_URL" > ./zap/wrk/full_schema.json
+          
+          # Verificación rápida
+          if [[ $(head -n 1 ./zap/wrk/full_schema.json) != *"{"* ]]; then
+             echo "❌ Error: El archivo descargado no es JSON."
+             exit 1
+          fi
+          
+          chmod 777 ./zap/wrk/full_schema.json
+          echo "✅ Swagger completo descargado."
+
+      # 3. Ejecutar Escaneo COMPLETO
+      - name: Ejecutar Escaneo ZAP
+        run: |
+          echo "🚀 Iniciando escaneo de TODA la API..."
+          
+          # Quitamos el flag -S (Safe Mode) para que ahora sí ataque de verdad.
+          # Si quieres que sea rápido solo para probar, vuelve a poner -S
+          
+          docker run --rm -u 0 \
+              -v $(pwd)/zap/wrk:/zap/wrk:rw \
+              zaproxy/zap-stable zap-api-scan.py \
+              -t /zap/wrk/full_schema.json \
+              -f openapi \
+              -r /zap/wrk/reporte-full.html \
+              -O "https://demo.defectdojo.org" \
+              -z "-configfile /zap/wrk/zap_options.prop" \
+              2>&1 | tee ./zap/wrk/zap_console.log
+
+      - name: Subir Reporte
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reporte-Full-HTML
+          path: ./zap/wrk/reporte-full.html
