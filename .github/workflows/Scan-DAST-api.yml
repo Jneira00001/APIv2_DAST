@@ -1,4 +1,4 @@
-name: ZAP API Scan (OpenAPI local + Base URL inyectada + Auth)
+name: ZAP API Scan (FIXED - HTML + Logs)
 
 on:
   push:
@@ -22,18 +22,18 @@ jobs:
           mkdir -p zap/wrk zap/zaplog
           chmod -R 777 zap
 
-      # 1️⃣ Inyectar base URL en el OpenAPI
+      # 1️⃣ Inyectar base URL
       - name: Inyectar base URL en OpenAPI
         run: |
           jq --arg url "$API_BASE_URL" '
             .servers = [{ "url": $url }]
           ' openapi.json > zap/wrk/openapi.with-base.json
 
-          echo "Base URL inyectada:"
-          jq '.servers' zap/wrk/openapi.with-base.json
+          echo "✔ OpenAPI listo:"
+          ls -l zap/wrk
 
-      # 2️⃣ Crear configuración de headers (API Key)
-      - name: Crear configuración ZAP (Auth Header)
+      # 2️⃣ Headers de autenticación
+      - name: Crear configuración ZAP
         run: |
           cat <<EOF > zap/wrk/zap_options.prop
           replacer.full_list(0).description=AuthorizationHeader
@@ -51,28 +51,37 @@ jobs:
           replacer.full_list(1).replacement=application/json
           EOF
 
-      # 3️⃣ Ejecutar ZAP API Scan
+      # 3️⃣ ZAP API Scan (RUTAS CORRECTAS)
       - name: Ejecutar ZAP API Scan
         run: |
-          echo "🚀 Iniciando ZAP API Scan autenticado"
-
           docker run --rm -u 0 \
-            -v $(pwd):/zap/wrk:rw \
-            -v $(pwd)/zap/zaplog:/home/zap/.ZAP:rw \
+            -v $(pwd)/zap:/zap/wrk \
+            -v $(pwd)/zap/zaplog:/home/zap/.ZAP \
             zaproxy/zap-stable zap-api-scan.py \
-            -t /zap/wrk/zap/wrk/openapi.with-base.json \
+            -t /zap/wrk/wrk/openapi.with-base.json \
             -f openapi \
-            -r zap_api_report.html \
+            -r /zap/wrk/wrk/zap_api_report.html \
             -d \
             --max-endpoints 10 \
             -z "
-              -configfile /zap/wrk/zap/wrk/zap_options.prop
+              -configfile /zap/wrk/wrk/zap_options.prop
               -config logger.level=DEBUG
               -config api.disablekey=true
             " \
             2>&1 | tee zap/wrk/zap_console.log
 
-      # 4️⃣ Subir reporte y logs
+      # 4️⃣ Verificación explícita
+      - name: Verificar reporte
+        run: |
+          if [ -f "zap/wrk/zap_api_report.html" ]; then
+            echo "✅ Reporte HTML generado correctamente"
+          else
+            echo "❌ NO se generó el reporte HTML"
+            echo "📄 Contenido de zap/wrk:"
+            ls -l zap/wrk
+          fi
+
+      # 5️⃣ Artefactos
       - name: Subir artefactos
         if: always()
         uses: actions/upload-artifact@v4
