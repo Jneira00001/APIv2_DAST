@@ -1,4 +1,4 @@
-name: DefectDojo Scan (Local + Override URL)
+name: DefectDojo Scan (Anti-Bot Fix)
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 env:
+  # Tu token confiable
   MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
   SOURCE_URL: "https://demo.defectdojo.org/api/v2/oa3/schema/?format=json"
 
@@ -21,8 +22,7 @@ jobs:
           mkdir -p ./zap/wrk
           chmod 777 ./zap/wrk
 
-      # 1. Configuración de Auth
-      - name: Crear Configuración ZAP
+      - name: Configurar Auth ZAP
         run: |
           cat <<EOF > ./zap/wrk/zap_options.prop
           replacer.full_list(0).description=AuthHeader
@@ -41,22 +41,35 @@ jobs:
           EOF
           chmod 777 ./zap/wrk/zap_options.prop
 
-      # 2. Recortar JSON a 10 URLs (Tu truco de jq)
-      - name: Generar Mini-Swagger
+      # --- AQUÍ ESTÁ LA CORRECCIÓN ---
+      - name: Descargar Swagger (Modo Camuflaje)
         run: |
-          curl -s -H "Authorization: Token ${MY_TOKEN}" "$SOURCE_URL" > full_schema.json
+          echo "⬇️ Descargando como Google Chrome..."
+          
+          # Agregamos -A "Mozilla..." y -L (para seguir redirecciones)
+          curl -s -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            -H "Authorization: Token ${MY_TOKEN}" \
+            "$SOURCE_URL" > full_schema.json
+          
+          # DIAGNÓSTICO: Mostramos las primeras 5 líneas de lo que bajó
+          echo "🔎 Inspeccionando archivo descargado:"
+          head -n 5 full_schema.json
+          
+          # Validamos si parece JSON (empieza con llave { )
+          if [[ $(head -n 1 full_schema.json) != *"{"* ]]; then
+             echo "❌ ALERTA: El archivo no parece un JSON válido."
+             echo "   Contenido sospechoso detectado. Posible bloqueo de WAF/Cloudflare."
+             exit 1
+          fi
+
+          echo "✂️ Recortando JSON..."
           jq '.paths |= (to_entries | .[:10] | from_entries)' full_schema.json > ./zap/wrk/mini_schema.json
           chmod 777 ./zap/wrk/mini_schema.json
-          echo "✅ Mini Swagger creado."
+          echo "✅ JSON procesado correctamente."
 
-      # 3. EJECUTAR ZAP con -O (Override)
       - name: Ejecutar Escaneo ZAP
         run: |
           echo "🚀 Iniciando escaneo..."
-
-          # CAMBIO CLAVE:
-          # -O "https://demo.defectdojo.org"
-          # Esto le dice a ZAP: "Usa este servidor base para las rutas del JSON"
           
           docker run --rm -u 0 \
               -v $(pwd)/zap/wrk:/zap/wrk:rw \
@@ -68,17 +81,9 @@ jobs:
               -z "-configfile /zap/wrk/zap_options.prop" \
               2>&1 | tee ./zap/wrk/zap_console.log
 
-      - name: Verificar Reporte
-        run: |
-          if [ -f "./zap/wrk/reporte-rapido.html" ]; then
-             echo "✅ Reporte HTML generado correctamente."
-          else
-             echo "❌ Error: Reporte no encontrado."
-          fi
-
       - name: Subir Reporte
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-HTML-Final
+          name: Reporte-Final-HTML
           path: ./zap/wrk/reporte-rapido.html
