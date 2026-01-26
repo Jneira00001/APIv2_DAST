@@ -1,4 +1,4 @@
-name: ZAP API Scan (OpenAPI local + Auth + Logs)
+name: ZAP API Scan (OpenAPI local + Base URL inyectada + Auth)
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 env:
+  API_BASE_URL: "https://demo.defectdojo.org"
   API_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
 
 jobs:
@@ -21,8 +22,18 @@ jobs:
           mkdir -p zap/wrk zap/zaplog
           chmod -R 777 zap
 
-      # 🔑 Configuración de headers (API Key)
-      - name: Crear configuración ZAP (headers)
+      # 1️⃣ Inyectar base URL en el OpenAPI
+      - name: Inyectar base URL en OpenAPI
+        run: |
+          jq --arg url "$API_BASE_URL" '
+            .servers = [{ "url": $url }]
+          ' openapi.json > zap/wrk/openapi.with-base.json
+
+          echo "Base URL inyectada:"
+          jq '.servers' zap/wrk/openapi.with-base.json
+
+      # 2️⃣ Crear configuración de headers (API Key)
+      - name: Crear configuración ZAP (Auth Header)
         run: |
           cat <<EOF > zap/wrk/zap_options.prop
           replacer.full_list(0).description=AuthorizationHeader
@@ -40,16 +51,16 @@ jobs:
           replacer.full_list(1).replacement=application/json
           EOF
 
-      # 🚀 Escaneo ZAP
+      # 3️⃣ Ejecutar ZAP API Scan
       - name: Ejecutar ZAP API Scan
         run: |
           echo "🚀 Iniciando ZAP API Scan autenticado"
-          
+
           docker run --rm -u 0 \
             -v $(pwd):/zap/wrk:rw \
             -v $(pwd)/zap/zaplog:/home/zap/.ZAP:rw \
             zaproxy/zap-stable zap-api-scan.py \
-            -t /zap/wrk/openapi.json \
+            -t /zap/wrk/zap/wrk/openapi.with-base.json \
             -f openapi \
             -r zap_api_report.html \
             -d \
@@ -61,8 +72,8 @@ jobs:
             " \
             2>&1 | tee zap/wrk/zap_console.log
 
-      # 📦 Subir artefactos
-      - name: Subir reporte y logs
+      # 4️⃣ Subir reporte y logs
+      - name: Subir artefactos
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -71,3 +82,4 @@ jobs:
             zap/wrk/zap_api_report.html
             zap/wrk/zap_console.log
             zap/zaplog/zap.log
+            zap/wrk/openapi.with-base.json
