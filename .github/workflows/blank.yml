@@ -1,4 +1,4 @@
-name: DefectDojo Scan (Prueba Rapida 10 URLs)
+name: DefectDojo Scan (Test Rapido + HTML Fijo)
 
 on:
   push:
@@ -7,7 +7,6 @@ on:
 
 env:
   MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
-  # URL original (la usaremos para descargar, pero no para escanear directo)
   SOURCE_URL: "https://demo.defectdojo.org/api/v2/oa3/schema/?format=json"
 
 jobs:
@@ -22,7 +21,7 @@ jobs:
           mkdir -p ./zap/wrk
           chmod 777 ./zap/wrk
 
-      # 1. CONFIGURACIÓN DE AUTH
+      # 1. Configuración de Auth
       - name: Crear Configuración ZAP
         run: |
           cat <<EOF > ./zap/wrk/zap_options.prop
@@ -42,42 +41,49 @@ jobs:
           EOF
           chmod 777 ./zap/wrk/zap_options.prop
 
-      # 2. TRUCO NUEVO: RECORTAR EL SWAGGER A SOLO 10 URLS
-      - name: Generar Mini-Swagger (10 URLs)
+      # 2. Recortar JSON a 10 URLs
+      - name: Generar Mini-Swagger
         run: |
-          echo "⬇️ Descargando Swagger completo..."
-          # Descargamos el JSON original usando el Token
+          # Descargar
           curl -s -H "Authorization: Token ${MY_TOKEN}" "$SOURCE_URL" > full_schema.json
-          
-          echo "✂️ Recortando a las primeras 10 rutas..."
-          # Usamos jq para dejar solo las primeras 10 entradas en "paths"
+          # Recortar
           jq '.paths |= (to_entries | .[:10] | from_entries)' full_schema.json > ./zap/wrk/mini_schema.json
-          
-          echo "✅ Archivo mini_schema.json creado con éxito."
+          chmod 777 ./zap/wrk/mini_schema.json
+          echo "✅ Mini Swagger creado."
 
-      # 3. EJECUTAR ESCANEO (CONTRA EL ARCHIVO MINI)
+      # 3. EJECUTAR ZAP (Forzando la ruta del reporte)
       - name: Ejecutar Escaneo ZAP
         run: |
-          REPORT_NAME="reporte-rapido.html"
-          
-          echo "🚀 Iniciando escaneo rápido (Solo 10 URLs)..."
-          
-          # NOTA EL CAMBIO EN -t:
-          # Ahora apuntamos al archivo local "mini_schema.json" en lugar de la URL web.
-          # Como el archivo ya está en la carpeta ./zap/wrk (que Docker ve), solo ponemos el nombre.
+          echo "🚀 Iniciando escaneo de 10 URLs..."
+
+          # CAMBIO CLAVE AQUÍ ABAJO 👇
+          # 1. -t /zap/wrk/mini_schema.json (Ruta completa dentro del contenedor)
+          # 2. -r /zap/wrk/reporte-rapido.html (OBLIGAMOS a guardarlo en la carpeta compartida)
           
           docker run --rm -u 0 \
               -v $(pwd)/zap/wrk:/zap/wrk:rw \
               zaproxy/zap-stable zap-api-scan.py \
-              -t "mini_schema.json" \
+              -t /zap/wrk/mini_schema.json \
               -f openapi \
-              -r "$REPORT_NAME" \
+              -r /zap/wrk/reporte-rapido.html \
               -z "-configfile /zap/wrk/zap_options.prop" \
               2>&1 | tee ./zap/wrk/zap_console.log
 
-      - name: Subir Artefactos
+      # 4. Verificación (Debugging)
+      - name: ¿Existe el reporte?
+        run: |
+          echo "📂 Contenido de la carpeta ./zap/wrk/ :"
+          ls -la ./zap/wrk/
+          
+          if [ -f "./zap/wrk/reporte-rapido.html" ]; then
+             echo "✅ ¡SÍ! El reporte HTML existe."
+          else
+             echo "❌ El reporte HTML NO se creó."
+          fi
+
+      - name: Subir Reporte HTML
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-Rapido
-          path: ./zap/wrk/*
+          name: Reporte-HTML-Final
+          path: ./zap/wrk/reporte-rapido.html # Subimos específicamente el HTML
