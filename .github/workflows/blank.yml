@@ -7,7 +7,7 @@ on:
 
 env:
   # Tu token confiable
-  MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
+  MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222x"
   SOURCE_URL: "https://demo.defectdojo.org/api/v2/oa3/schema/?format=json"
 
 jobs:
