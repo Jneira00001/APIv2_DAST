@@ -1,4 +1,4 @@
-name: DAST Scan (Token Fijo)
+name: DAST Scan (Final - Token Fijo)
 
 on:
   push:
@@ -6,13 +6,15 @@ on:
   workflow_dispatch:
 
 env:
-  # ✅ AQUÍ PONEMOS EL TOKEN FIJO PARA QUE NO FALLE NUNCA
-  MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
+  # 1. EL TOKEN PARA DEFECTDOJO (Necesario para escanear, NO para descargar el JSON)
+  # Lo ponemos fijo aquí para asegurar que NUNCA llegue vacío.
+  DOJO_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
   
-  # Tu URL del Swagger en GitHub
+  # 2. TU URL PÚBLICA (La que subiste a tu repo)
+  # ZAP descargará esto libremente.
   OPENAPI_URL: "https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/refs/heads/main/openapi.json"
   
-  # La URL base de la demo
+  # 3. EL DESTINO
   API_BASE: "https://demo.defectdojo.org"
 
 jobs:
@@ -22,52 +24,51 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup
+      - name: Preparar Directorios
         run: |
           mkdir -p ./zap/wrk
           chmod 777 ./zap/wrk
           echo "TIMESTAMP=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
 
-      # 1. VERIFICACIÓN DE CONEXIÓN (CON TOKEN REAL)
-      - name: 🧪 Verificar Token y Conexión
+      # PASO DE DIAGNÓSTICO: Verificar que el Token NO esté vacío
+      - name: 🔍 Verificar Variables
         run: |
-          echo "📡 Probando conexión con el Token..."
+          echo "1. URL del JSON: $OPENAPI_URL"
+          echo "2. URL Base: $API_BASE"
           
-          # Usamos la variable de entorno $MY_TOKEN que SIEMPRE tiene valor
-          # Agregamos User-Agent (-A) para evitar bloqueos por ser un bot
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -A "Mozilla/5.0" \
-            -H "Authorization: Token $MY_TOKEN" \
-            "https://demo.defectdojo.org/api/v2/users/")
-          
-          echo "📝 Código HTTP: $HTTP_STATUS"
-          
-          if [ "$HTTP_STATUS" == "200" ]; then
-            echo "✅ ¡CONEXIÓN EXITOSA! El token es válido."
+          if [ -z "$DOJO_TOKEN" ]; then
+            echo "❌ ERROR CRÍTICO: La variable DOJO_TOKEN está vacía."
+            exit 1
           else
-            echo "❌ ERROR ($HTTP_STATUS): El token sigue sin funcionar o te bloquearon."
-            # Si esto falla, ZAP también fallará, pero intentaremos seguir.
+            echo "✅ Token cargado correctamente (Longitud: ${#DOJO_TOKEN} caracteres)."
           fi
 
-      # 2. CONFIGURAR AUTH ZAP
+      # PASO CRÍTICO: Configurar ZAP para usar el Token contra DefectDojo
       - name: Configurar Auth ZAP
         run: |
-          # Creamos el archivo usando la variable de entorno
+          # Creamos el archivo de configuración.
+          # Esto le dice a ZAP: "Cuando hables con la API, usa este header Authorization"
           cat <<EOF > ./zap/wrk/zap_options.prop
           replacer.full_list(0).description=auth
           replacer.full_list(0).enabled=true
           replacer.full_list(0).matchtype=REQ_HEADER
           replacer.full_list(0).matchstr=Authorization
-          replacer.full_list(0).replacement=Token $MY_TOKEN
+          replacer.full_list(0).replacement=Token $DOJO_TOKEN
           EOF
           chmod 777 ./zap/wrk/zap_options.prop
 
-      # 3. EJECUTAR ZAP (Modo Seguro -S)
-      - name: Ejecutar ZAP
+      # EJECUTAR ZAP
+      - name: Run ZAP API Scan
         run: |
           REPORT="zap-report-${{ env.TIMESTAMP }}"
           
-          echo "⚡ Iniciando ZAP..."
+          echo "⚡ Iniciando ZAP (Modo Seguro -S)..."
+          
+          # EXPLICACIÓN DE COMANDOS:
+          # -t : Tu URL pública del JSON
+          # -O : La URL de DefectDojo (Destino)
+          # -z : Le pasa el archivo con el Token
+          # -S : Modo Seguro (Evita que la demo te bloquee)
           
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
@@ -80,14 +81,15 @@ jobs:
             -r "$REPORT.html" \
             -J "$REPORT.json" \
             -l WARN \
-            || echo "⚠️ ZAP terminó."
+            || echo "⚠️ ZAP terminó (Revisar reporte)."
 
       - name: Verificar Reporte
         run: |
+          ls -lh ./zap/wrk/
           if [ -f "./zap/wrk/zap-report-${{ env.TIMESTAMP }}.html" ]; then
-             echo "✅ REPORTE CREADO EXITOSAMENTE."
+             echo "✅ ¡ÉXITO! Reporte generado."
           else
-             echo "❌ Reporte no encontrado."
+             echo "❌ Reporte no encontrado. Algo falló en ZAP."
              exit 1
           fi
 
@@ -95,5 +97,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-Final-ZAP
+          name: Reporte-ZAP
           path: ./zap/wrk/
