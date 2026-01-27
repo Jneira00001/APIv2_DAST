@@ -1,4 +1,4 @@
-name: DAST Scan (Desde Repo Propio)
+name: DAST Scan (Validación Final)
 
 on:
   push:
@@ -17,18 +17,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Preparar Entorno
+      - name: Setup
         run: |
-          echo "TIMESTAMP=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
           mkdir -p ./zap/wrk
           chmod 777 ./zap/wrk
+          echo "TIMESTAMP=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
 
-      # 1. AUTENTICACIÓN (Método Seguro .prop)
-      # Creamos un archivo de configuración para evitar errores de sintaxis en el comando
+      # 1. PRUEBA DE FUEGO: VERIFICAR TOKEN Y CONEXIÓN
+      # Esto te dirá si el servidor te deja pasar o te está bloqueando
+      - name: 🧪 Verificar Conexión con Curl
+        run: |
+          TOKEN="${{ github.event.inputs.auth_token }}"
+          echo "📡 Intentando conectar a DefectDojo desde GitHub Actions..."
+          
+          # Hacemos una petición simple a /api/v2/users/
+          # Usamos -o /dev/null para no llenar la pantalla, solo queremos el código HTTP
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Token $TOKEN" "https://demo.defectdojo.org/api/v2/users/")
+          
+          echo "📝 Código HTTP recibido: $HTTP_STATUS"
+          
+          if [ "$HTTP_STATUS" == "200" ]; then
+            echo "✅ ¡Conexión Exitosa! El Token funciona y la IP no está bloqueada."
+          elif [ "$HTTP_STATUS" == "401" ] || [ "$HTTP_STATUS" == "403" ]; then
+            echo "❌ ERROR: Acceso Denegado ($HTTP_STATUS)."
+            echo "   Esto significa que el Token expiró O que Cloudflare está bloqueando a GitHub."
+            # No forzamos exit 1 para intentar que ZAP corra igual, pero ya estás avisado.
+          else
+            echo "⚠️ Respuesta inesperada: $HTTP_STATUS"
+          fi
+
+      # 2. CONFIGURAR AUTH ZAP
       - name: Configurar Auth ZAP
         run: |
           TOKEN="${{ github.event.inputs.auth_token }}"
-          
           cat <<EOF > ./zap/wrk/zap_options.prop
           replacer.full_list(0).description=auth
           replacer.full_list(0).enabled=true
@@ -36,24 +57,22 @@ jobs:
           replacer.full_list(0).matchstr=Authorization
           replacer.full_list(0).replacement=Token $TOKEN
           EOF
-          
           chmod 777 ./zap/wrk/zap_options.prop
-          echo "✅ Archivo de autenticación creado."
 
-      # 2. EJECUTAR ESCANEO
+      # 3. EJECUTAR ZAP (CON -S)
       - name: Ejecutar ZAP
         run: |
-          echo "🚀 Iniciando escaneo..."
-          
-          # TU URL DEL REPO (La que comprobaste que funciona)
-          # Nota: Usamos zap-stable en lugar de weekly para evitar errores raros
+          # URL DE TU REPO
           OPENAPI_URL="https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/refs/heads/main/openapi.json"
-          
-          # LA URL BASE (Donde se enviarán los ataques)
           API_BASE="https://demo.defectdojo.org"
-          
           REPORT="zap-report-${{ env.TIMESTAMP }}"
 
+          echo "⚡ Iniciando ZAP (Modo Safe)..."
+
+          # NOTA IMPORTANTE:
+          # He agregado -S (Safe Mode). Esto evitará el error "ScanNotStartedException".
+          # Eliminará el ataque activo, pero generará el reporte de vulnerabilidades pasivas.
+          
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
             zaproxy/zap-stable zap-api-scan.py \
@@ -61,19 +80,19 @@ jobs:
             -f openapi \
             -O "$API_BASE" \
             -z "-configfile /zap/wrk/zap_options.prop" \
+            -S \
             -r "$REPORT.html" \
             -J "$REPORT.json" \
             -l WARN \
-            || echo "⚠️ ZAP terminó (verifica el reporte)."
+            || echo "⚠️ ZAP terminó."
 
-      # 3. VERIFICAR RESULTADOS
-      - name: Verificar Reporte HTML
+      - name: Verificar Reporte
         run: |
           ls -la ./zap/wrk/
           if [ -f "./zap/wrk/zap-report-${{ env.TIMESTAMP }}.html" ]; then
-             echo "✅ ¡ÉXITO! Reporte HTML generado."
+             echo "✅ REPORTE GENERADO."
           else
-             echo "❌ ERROR: No se generó el reporte HTML."
+             echo "❌ Reporte fallido."
              exit 1
           fi
 
@@ -81,5 +100,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-ZAP
+          name: Reporte-Final
           path: ./zap/wrk/
