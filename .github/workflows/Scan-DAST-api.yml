@@ -1,4 +1,4 @@
-name: DefectDojo Scan (FULL - Todos los Endpoints)
+name: Debug Paths & Scan
 
 on:
   push:
@@ -6,12 +6,11 @@ on:
   workflow_dispatch:
 
 env:
-  # Tu token confiable
   MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
   SOURCE_URL: "https://demo.defectdojo.org/api/v2/oa3/schema/?format=json"
 
 jobs:
-  zap_scan:
+  debug_and_scan:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar Código
@@ -22,6 +21,38 @@ jobs:
           mkdir -p ./zap/wrk
           chmod 777 ./zap/wrk
 
+      # 1. DESCARGAMOS EL ARCHIVO
+      - name: Descargar Swagger
+        run: |
+          curl -s -L -A "Mozilla/5.0" \
+            -H "Authorization: Token ${MY_TOKEN}" \
+            "$SOURCE_URL" > ./zap/wrk/full_schema.json
+          
+          chmod 777 ./zap/wrk/full_schema.json
+          echo "✅ Archivo descargado."
+
+      # 2. PRUEBA EN EL HOST (GITHUB RUNNER)
+      - name: 🕵️ Test 1: Validar ruta en el Runner (Host)
+        run: |
+          echo "📂 Listando carpeta local ./zap/wrk/ :"
+          ls -la ./zap/wrk/
+          
+          echo "📄 Leemos las primeras lineas desde el Host:"
+          head -n 5 ./zap/wrk/full_schema.json
+
+      # 3. PRUEBA DENTRO DE DOCKER (LA PRUEBA DE FUEGO)
+      - name: 🕵️ Test 2: Validar ruta DENTRO de Docker
+        run: |
+          echo "🐳 Iniciando contenedor de prueba..."
+          echo "Objetivo: Ver si el archivo existe en /zap/wrk/full_schema.json"
+          
+          # Montamos el volumen igual que en el escaneo, pero ejecutamos 'ls' y 'cat'
+          docker run --rm -u 0 \
+            -v $(pwd)/zap/wrk:/zap/wrk:rw \
+            zaproxy/zap-stable \
+            bash -c "ls -la /zap/wrk/ && echo '--- CONTENIDO (Cat) ---' && head -n 5 /zap/wrk/full_schema.json"
+
+      # 4. SI EL PASO ANTERIOR NO FALLÓ, EJECUTAMOS ZAP
       - name: Configurar Auth ZAP
         run: |
           cat <<EOF > ./zap/wrk/zap_options.prop
@@ -41,43 +72,16 @@ jobs:
           EOF
           chmod 777 ./zap/wrk/zap_options.prop
 
-      # --- AQUÍ ESTÁ EL CAMBIO ---
-      - name: Descargar Swagger (Modo Camuflaje + Full)
+      - name: Ejecutar Escaneo REAL
         run: |
-          echo "⬇️ Descargando como Google Chrome..."
-          
-          # Mantenemos el "Disfraz" que funcionó
-          curl -s -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            -H "Authorization: Token ${MY_TOKEN}" \
-            "$SOURCE_URL" > full_schema.json
-          
-          # Validación rápida
-          if [[ $(head -n 1 full_schema.json) != *"{"* ]]; then
-             echo "❌ ALERTA: El archivo no parece un JSON válido."
-             echo "   Contenido sospechoso detectado."
-             exit 1
-          fi
-
-          # CAMBIO: Ya no usamos 'jq' para cortar. Movemos el archivo completo.
-          echo "✅ Usando el esquema COMPLETO (Sin recortar)..."
-          mv full_schema.json ./zap/wrk/full_schema.json
-          chmod 777 ./zap/wrk/full_schema.json
-
-      - name: Ejecutar Escaneo ZAP
-        run: |
-          echo "🚀 Iniciando escaneo de TODOS los endpoints..."
-          echo "ℹ️ Usando flag -S para evitar timeouts en GitHub Actions."
-          
-          # CAMBIOS:
-          # 1. -t apunta a full_schema.json (el grande)
-          # 2. -S activado (Baseline Scan) para que termine en unos 5-10 minutos
+          echo "🚀 Rutas validadas. Iniciando ZAP..."
           
           docker run --rm -u 0 \
               -v $(pwd)/zap/wrk:/zap/wrk:rw \
               zaproxy/zap-stable zap-api-scan.py \
               -t /zap/wrk/full_schema.json \
               -f openapi \
-              -r /zap/wrk/reporte-completo.html \
+              -r /zap/wrk/reporte-final.html \
               -O "https://demo.defectdojo.org" \
               -z "-configfile /zap/wrk/zap_options.prop" \
               -S \
@@ -87,5 +91,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-Final-Completo
-          path: ./zap/wrk/reporte-completo.html
+          name: Reporte-Validado
+          path: ./zap/wrk/reporte-final.html
