@@ -21,13 +21,13 @@ jobs:
         run: |
           mkdir -p zap/wrk zap/zaplog
           chmod -R 777 zap
-
+          
       - name: Inyectar base URL en OpenAPI
         run: |
           jq --arg url "$API_BASE_URL" '
             .servers = [{ "url": $url }]
           ' openapi.json > zap/wrk/openapi.with-base.json
-
+          
       - name: Crear configuración ZAP (Auth Header)
         run: |
           cat <<EOF > zap/wrk/zap_options.prop
@@ -37,7 +37,6 @@ jobs:
           replacer.full_list(0).matchstr=Authorization
           replacer.full_list(0).regex=false
           replacer.full_list(0).replacement=Token ${API_TOKEN}
-
           replacer.full_list(1).description=AcceptJson
           replacer.full_list(1).enabled=true
           replacer.full_list(1).matchtype=REQ_HEADER
@@ -45,24 +44,38 @@ jobs:
           replacer.full_list(1).regex=false
           replacer.full_list(1).replacement=application/json
           EOF
-
+          
       - name: Ejecutar ZAP API Scan
         run: |
           docker run --rm -u 0 \
             -v $(pwd)/zap:/zap/wrk \
             -v $(pwd)/zap/zaplog:/home/zap/.ZAP \
             zaproxy/zap-stable zap-api-scan.py \
-            -t /zap/wrk/wrk/openapi.with-base.json \
+            -t /zap/wrk/openapi.with-base.json \
             -f openapi \
-            -r /zap/wrk/wrk/zap_api_report.html \
+            -r /zap/wrk/zap_api_report.html \
             -d \
             -z "
-              -configfile /zap/wrk/wrk/zap_options.prop
+              -configfile /zap/wrk/zap_options.prop
               -config logger.level=DEBUG
               -config api.disablekey=true
             " \
             2>&1 | tee zap/wrk/zap_console.log
-
+              
+      - name: Verificar si existe el reporte
+        if: always()
+        run: |
+          echo "Verificando archivos generados:"
+          ls -la zap/wrk/
+          if [ -f "zap/wrk/zap_api_report.html" ]; then
+            echo "✓ Reporte HTML generado correctamente"
+            echo "Tamaño del reporte: $(wc -c < zap/wrk/zap_api_report.html) bytes"
+          else
+            echo "✗ No se encontró el reporte HTML"
+            echo "Contenido de zap/wrk/:"
+            ls -la zap/wrk/
+          fi
+          
       - name: Subir artefactos
         if: always()
         uses: actions/upload-artifact@v4
@@ -73,3 +86,4 @@ jobs:
             zap/wrk/zap_console.log
             zap/zaplog/zap.log
             zap/wrk/openapi.with-base.json
+            zap/wrk/zap_options.prop
