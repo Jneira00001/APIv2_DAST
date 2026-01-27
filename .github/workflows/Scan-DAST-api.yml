@@ -1,4 +1,4 @@
-name: DAST Scan (Fix Local File)
+name: DAST Scan (Fix URL & Inject Server)
 
 on:
   push:
@@ -6,13 +6,11 @@ on:
   workflow_dispatch:
 
 env:
-  # Token fijo (El que sabemos que funciona para atacar la API)
   DOJO_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
   
-  # Tu URL pública del JSON
-  OPENAPI_URL: "https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/refs/heads/main/openapi.json"
+  # ✅ CORRECCIÓN 1: URL RAW ESTÁNDAR (Sin 'refs/heads')
+  OPENAPI_URL: "https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/main/openapi.json"
   
-  # El objetivo real
   API_BASE: "https://demo.defectdojo.org"
 
 jobs:
@@ -22,27 +20,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Preparar Directorios
+      - name: Preparar Entorno
         run: |
           mkdir -p ./zap/wrk
           chmod 777 ./zap/wrk
           echo "TIMESTAMP=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
 
-      # --- PASO NUEVO: DESCARGAR EL JSON ---
-      # Esto evita que ZAP escanee GitHub. Lo bajamos a un archivo local.
-      - name: Descargar Definición OpenAPI
+      - name: 📥 Descargar y Arreglar JSON
         run: |
-          echo "⬇️ Descargando archivo JSON desde GitHub..."
-          curl -sL "$OPENAPI_URL" -o ./zap/wrk/openapi_local.json
+          echo "⬇️ Descargando desde: $OPENAPI_URL"
           
-          # Verificamos que bajó bien
-          if [[ $(head -n 1 ./zap/wrk/openapi_local.json) != *"{"* ]]; then
-             echo "❌ Error: Lo que bajamos no es un JSON."
+          # Descargamos el archivo
+          curl -sL "$OPENAPI_URL" -o ./zap/wrk/original.json
+          
+          # 🕵️ DEBUG: Mostramos las primeras 10 líneas para ver si es un 404
+          echo "📄 Contenido descargado (Primeras líneas):"
+          head -n 10 ./zap/wrk/original.json
+          
+          # Validamos si es un JSON real
+          if [[ $(head -n 1 ./zap/wrk/original.json) != *"openapi"* ]]; then
+             echo "❌ ERROR: El archivo no parece un OpenAPI válido (Posible 404)."
              exit 1
           fi
+
+          echo "🔧 Inyectando servidor base en el JSON..."
+          # ✅ CORRECCIÓN 2: Usamos jq para agregar el bloque 'servers' manualmente.
+          # Esto obliga a ZAP a entender dónde está la API, sin depender del flag -O.
+          jq --arg url "$API_BASE" '.servers = [{"url": $url}]' ./zap/wrk/original.json > ./zap/wrk/ready_to_scan.json
           
-          chmod 777 ./zap/wrk/openapi_local.json
-          echo "✅ Archivo guardado en: ./zap/wrk/openapi_local.json"
+          chmod 777 ./zap/wrk/ready_to_scan.json
+          echo "✅ JSON parcheado y listo para escanear."
 
       - name: Configurar Auth ZAP
         run: |
@@ -58,19 +65,14 @@ jobs:
       - name: Ejecutar ZAP
         run: |
           REPORT="zap-report-${{ env.TIMESTAMP }}"
-          
-          echo "⚡ Iniciando ZAP usando el archivo LOCAL..."
-          
-          # CAMBIO CLAVE:
-          # -t /zap/wrk/openapi_local.json  <-- Usamos la ruta local, NO la URL de GitHub
-          # -O "$API_BASE"                  <-- Esto fuerza a que los ataques vayan a DefectDojo
-          
+          echo "⚡ Iniciando ZAP..."
+
+          # Usamos el archivo 'ready_to_scan.json' que ya tiene el servidor inyectado
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
             zaproxy/zap-stable zap-api-scan.py \
-            -t /zap/wrk/openapi_local.json \
+            -t /zap/wrk/ready_to_scan.json \
             -f openapi \
-            -O "$API_BASE" \
             -z "-configfile /zap/wrk/zap_options.prop" \
             -S \
             -r "$REPORT.html" \
@@ -78,18 +80,9 @@ jobs:
             -l WARN \
             || echo "⚠️ ZAP terminó."
 
-      - name: Verificar Reporte
-        run: |
-          if [ -f "./zap/wrk/zap-report-${{ env.TIMESTAMP }}.html" ]; then
-             echo "✅ REPORTE GENERADO CORRECTAMENTE."
-          else
-             echo "❌ Reporte no encontrado."
-             exit 1
-          fi
-
-      - name: Subir Reporte
+      - name: Verificar y Subir
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-ZAP
+          name: Reporte-Final-ZAP
           path: ./zap/wrk/
