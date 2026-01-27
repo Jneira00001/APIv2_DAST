@@ -1,4 +1,4 @@
-name: DAST API Scan (Corregido )
+name: DAST Scan (Desde Repo Propio)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       auth_token:
-        description: 'Token de autenticación'
+        description: 'Token de DefectDojo'
         required: true
         default: '548afd6fab3bea9794a41b31da0e9404f733e222'
 
@@ -17,22 +17,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup
+      - name: Preparar Entorno
         run: |
-          echo "🚀 [START] Setup inicial"
-          # Guardamos fecha para nombres únicos
           echo "TIMESTAMP=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
           mkdir -p ./zap/wrk
           chmod 777 ./zap/wrk
-          echo "✅ Directorio creado: ./zap/wrk"
 
-      # PASO CLAVE: Crear la configuración en un archivo limpio
-      # Esto evita el error de "Failed to start scan" por mala sintaxis
-      - name: Configurar Autenticación ZAP
+      # 1. AUTENTICACIÓN (Método Seguro .prop)
+      # Creamos un archivo de configuración para evitar errores de sintaxis en el comando
+      - name: Configurar Auth ZAP
         run: |
           TOKEN="${{ github.event.inputs.auth_token }}"
           
-          # Escribimos las reglas en un archivo .prop
           cat <<EOF > ./zap/wrk/zap_options.prop
           replacer.full_list(0).description=auth
           replacer.full_list(0).enabled=true
@@ -42,50 +38,48 @@ jobs:
           EOF
           
           chmod 777 ./zap/wrk/zap_options.prop
-          echo "🔐 Configuración de Auth generada en archivo."
+          echo "✅ Archivo de autenticación creado."
 
-      - name: Run ZAP API Scan
+      # 2. EJECUTAR ESCANEO
+      - name: Ejecutar ZAP
         run: |
-          echo "🔍 [SCAN] Iniciando escaneo API"
+          echo "🚀 Iniciando escaneo..."
           
+          # TU URL DEL REPO (La que comprobaste que funciona)
+          # Nota: Usamos zap-stable en lugar de weekly para evitar errores raros
           OPENAPI_URL="https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/refs/heads/main/openapi.json"
+          
+          # LA URL BASE (Donde se enviarán los ataques)
           API_BASE="https://demo.defectdojo.org"
+          
           REPORT="zap-report-${{ env.TIMESTAMP }}"
-          
-          echo "🎯 Target: $OPENAPI_URL"
 
-          # Ejecutamos Docker
-          # NOTA: Usamos -z "-configfile ..." para leer el archivo creado arriba
-          # Usamos zap-stable para mayor estabilidad
-          
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
             zaproxy/zap-stable zap-api-scan.py \
             -t "$OPENAPI_URL" \
             -f openapi \
-            -z "-configfile /zap/wrk/zap_options.prop" \
             -O "$API_BASE" \
+            -z "-configfile /zap/wrk/zap_options.prop" \
             -r "$REPORT.html" \
             -J "$REPORT.json" \
             -l WARN \
-            || echo "⚠️ ZAP finalizó con hallazgos (Exit code no cero es normal en ZAP)"
+            || echo "⚠️ ZAP terminó (verifica el reporte)."
 
-      - name: Check results
+      # 3. VERIFICAR RESULTADOS
+      - name: Verificar Reporte HTML
         run: |
-          echo "📋 [CHECK] Verificando resultados"
           ls -la ./zap/wrk/
-          
           if [ -f "./zap/wrk/zap-report-${{ env.TIMESTAMP }}.html" ]; then
-            echo "✅ HTML report generado con éxito"
+             echo "✅ ¡ÉXITO! Reporte HTML generado."
           else
-            echo "❌ ERROR: No se generó reporte HTML. Revisa la autenticación."
-            exit 1
+             echo "❌ ERROR: No se generó el reporte HTML."
+             exit 1
           fi
 
-      - name: Upload reports
+      - name: Subir Artefactos
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: zap-reports-${{ env.TIMESTAMP }}
+          name: Reporte-ZAP
           path: ./zap/wrk/
-          retention-days: 30
