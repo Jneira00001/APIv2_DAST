@@ -1,9 +1,9 @@
 name: DefectDojo Scan (Anti-Bot Fix)
 
-#on:
-#  push:
-#    branches: [ "main" ]
-#  workflow_dispatch:
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   # Tu token confiable
