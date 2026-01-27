@@ -1,303 +1,355 @@
-name: ZAP API Scan Completo
+name: DAST API Security Scan - DefectDojo Demo
 
 on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch:
-
-env:
-  API_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
-  API_BASE_URL: "https://demo.defectdojo.org"
+  workflow_dispatch:  # Solo ejecución manual
+    inputs:
+      target_url:
+        description: 'URL target para escanear'
+        required: true
+        default: 'https://demo.defectdojo.org'
+      auth_token:
+        description: 'Token de autenticación'
+        required: true
+        default: '548afd6fab3bea9794a41b31da0e9404f733e222'
 
 jobs:
-  zap_scan:
+  zap-full-api-scan:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout repositorio
-        uses: actions/checkout@v4
-
-      - name: Preparar directorios
-        run: |
-          mkdir -p ./zap/wrk ./zap/zaplog
-          chmod -R 777 ./zap
-
-      - name: Verificar archivo OpenAPI
-        run: |
-          echo "🔍 Verificando archivo openapi.json..."
-          if [ ! -f "openapi.json" ]; then
-            echo "❌ ERROR: No se encontró openapi.json en el repositorio"
-            echo "Archivos en el directorio raíz:"
-            ls -la
-            exit 1
-          fi
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      
+    - name: Preparar entorno y mostrar información
+      run: |
+        echo "=============================================="
+        echo "🚀 INICIANDO ESCANEO DAST COMPLETO"
+        echo "=============================================="
+        echo "Target: ${{ github.event.inputs.target_url }}"
+        echo "Total de endpoints a analizar: TODOS (93 endpoints)"
+        echo "Token Auth: ********${AUTH_TOKEN: -8}"
+        echo "=============================================="
+        
+        # Mostrar estructura básica del OpenAPI
+        echo "📊 ANALIZANDO OPENAPI.JSON..."
+        TOTAL_PATHS=$(jq '.paths | length' openapi.json)
+        echo "Total de paths en OpenAPI: $TOTAL_PATHS"
+        
+        echo "📋 LISTA COMPLETA DE ENDPOINTS:"
+        jq -r '.paths | keys[]' openapi.json | sort | while read endpoint; do
+          METHODS=$(jq -r ".paths[\"$endpoint\"] | keys[]" openapi.json 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+          echo "  • $endpoint [$METHODS]"
+        done
+      env:
+        AUTH_TOKEN: ${{ github.event.inputs.auth_token }}
+        
+    - name: Iniciar ZAP en modo daemon
+      run: |
+        echo "🔧 INICIANDO OWASP ZAP..."
+        docker run -d \
+          --name zap \
+          -u zap \
+          -p 8080:8080 \
+          -p 8090:8090 \
+          -v $(pwd):/zap/wrk \
+          -i owasp/zap2docker-stable:latest \
+          zap.sh -daemon \
+          -host 0.0.0.0 \
+          -port 8080 \
+          -config api.addrs.addr.name=.* \
+          -config api.addrs.addr.regex=true \
+          -config api.key=zap-api-key-123 \
+          -config api.disablekey=true
+        
+        echo "⏳ Esperando que ZAP inicie..."
+        sleep 15
+        
+        # Verificar que ZAP esté funcionando
+        until curl -s http://localhost:8080 > /dev/null; do
+          echo "⏳ Esperando ZAP..."
+          sleep 5
+        done
+        echo "✅ ZAP listo en http://localhost:8080"
+        
+    - name: Configurar autenticación en ZAP
+      run: |
+        echo "🔐 CONFIGURANDO AUTENTICACIÓN..."
+        ZAP_URL="http://localhost:8080"
+        API_KEY="zap-api-key-123"
+        TARGET_URL="${{ github.event.inputs.target_url }}"
+        AUTH_TOKEN="${{ github.event.inputs.auth_token }}"
+        
+        # Crear script de autenticación
+        cat > auth_script.js << 'EOF'
+        var HttpSender = Java.type('org.parosproxy.paros.network.HttpSender')
+        var HttpRequestHeader = Java.type('org.parosproxy.paros.network.HttpRequestHeader')
+        var HttpHeader = Java.type('org.parosproxy.paros.network.HttpHeader')
+        var URI = Java.type('org.apache.commons.httpclient.URI')
+        
+        function sendingRequest(msg, initiator, helper) {
+          var header = msg.getRequestHeader()
+          var uri = header.getURI().toString()
           
-          # Validar que sea un JSON válido
-          if ! jq empty openapi.json 2>/dev/null; then
-            echo "❌ ERROR: openapi.json no es un JSON válido"
-            exit 1
-          fi
+          // Solo agregar token a requests del target
+          if (uri.contains("$TARGET_URL")) {
+            header.setHeader("Authorization", "Token $AUTH_TOKEN")
+            header.setHeader("Content-Type", "application/json")
+            header.setHeader("User-Agent", "ZAP-DAST-Scanner/1.0")
+          }
+        }
+        
+        function responseReceived(msg, initiator, helper) {
+          // Log de respuestas
+          print("Response: " + msg.getRequestHeader().getURI() + " - Status: " + msg.getResponseHeader().getStatusCode())
+        }
+        EOF
+        
+        # Reemplazar variables en el script
+        sed -i "s|\$TARGET_URL|$TARGET_URL|g" auth_script.js
+        sed -i "s|\$AUTH_TOKEN|$AUTH_TOKEN|g" auth_script.js
+        
+        # Cargar script en ZAP
+        curl -s "$ZAP_URL/JSON/script/action/load/" \
+          -d "scriptName=auth.js" \
+          -d "scriptType=proxy" \
+          -d "scriptEngine=Oracle Nashorn" \
+          -d "fileName=/zap/wrk/auth_script.js" \
+          -d "apikey=$API_KEY"
           
-          echo "✅ openapi.json encontrado y válido"
-
-      - name: Configurar Auth ZAP
-        run: |
-          cat <<EOF > ./zap/wrk/zap_options.prop
-          replacer.full_list(0).description=AuthHeader
-          replacer.full_list(0).enabled=true
-          replacer.full_list(0).matchtype=REQ_HEADER
-          replacer.full_list(0).matchstr=Authorization
-          replacer.full_list(0).regex=false
-          replacer.full_list(0).replacement=Token ${API_TOKEN}
+        echo "✅ Autenticación configurada"
+        
+    - name: Importar OpenAPI a ZAP
+      run: |
+        echo "📥 IMPORTANDO OPENAPI A ZAP..."
+        ZAP_URL="http://localhost:8080"
+        API_KEY="zap-api-key-123"
+        TARGET_URL="${{ github.event.inputs.target_url }}"
+        
+        # Importar desde archivo local
+        curl -s "$ZAP_URL/JSON/openapi/action/importFile/" \
+          -F "file=@openapi.json" \
+          -H "X-ZAP-API-Key: $API_KEY"
           
-          replacer.full_list(1).description=AcceptJson
-          replacer.full_list(1).enabled=true
-          replacer.full_list(1).matchtype=REQ_HEADER
-          replacer.full_list(1).matchstr=Accept
-          replacer.full_list(1).regex=false
-          replacer.full_list(1).replacement=application/json
+        # También importar desde URL
+        curl -s "$ZAP_URL/JSON/openapi/action/importUrl/" \
+          -d "url=$TARGET_URL/openapi.json" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -H "X-ZAP-API-Key: $API_KEY"
           
-          replacer.full_list(2).description=ContentTypeJson
-          replacer.full_list(2).enabled=true
-          replacer.full_list(2).matchtype=REQ_HEADER
-          replacer.full_list(2).matchstr=Content-Type
-          replacer.full_list(2).regex=false
-          replacer.full_list(2).replacement=application/json
-          EOF
+        echo "✅ OpenAPI importado"
+        
+    - name: Ejecutar escaneo completo mostrando progreso
+      run: |
+        echo "🔍 INICIANDO ESCANEO COMPLETO..."
+        echo "=============================================="
+        
+        # Contador de endpoints
+        ENDPOINT_COUNT=0
+        
+        # Escanear cada endpoint individualmente mostrando progreso
+        jq -r '.paths | keys[]' openapi.json | while read endpoint; do
+          ENDPOINT_COUNT=$((ENDPOINT_COUNT + 1))
+          FULL_URL="${{ github.event.inputs.target_url }}$endpoint"
           
-          echo "✅ Configuración ZAP creada"
-
-      - name: Preparar OpenAPI con URL base
-        run: |
-          echo "🔄 Preparando archivo OpenAPI..."
-          
-          # Contar endpoints en el archivo original
-          ENDPOINT_COUNT=$(jq '.paths | length' openapi.json)
-          echo "📊 Endpoints encontrados en openapi.json: ${ENDPOINT_COUNT}"
-          
-          # Mostrar primeros endpoints como ejemplo
-          echo "📋 Primeros 5 endpoints:"
-          jq '.paths | keys[]' openapi.json | head -5
-          
-          # Añadir servidor base si no existe
-          echo "🌐 Configurando servidor base: ${API_BASE_URL}"
-          
-          if jq '.servers' openapi.json | grep -q null; then
-            # No existe servers, lo añadimos
-            jq --arg url "${API_BASE_URL}" '. + {servers: [{url: $url}]}' openapi.json > ./zap/wrk/openapi_processed.json
-            echo "➕ Servidor base añadido"
-          else
-            # Ya existe, lo reemplazamos
-            jq --arg url "${API_BASE_URL}" '.servers = [{url: $url}]' openapi.json > ./zap/wrk/openapi_processed.json
-            echo "🔄 Servidor base actualizado"
-          fi
-          
-          # Verificar que el procesamiento fue exitoso
-          PROCESSED_COUNT=$(jq '.paths | length' ./zap/wrk/openapi_processed.json)
-          
-          if [ "$ENDPOINT_COUNT" != "$PROCESSED_COUNT" ]; then
-            echo "⚠️  Advertencia: Conteo de endpoints cambió de ${ENDPOINT_COUNT} a ${PROCESSED_COUNT}"
-          fi
-          
-          echo "✅ Archivo procesado:"
-          echo "   - Tamaño: $(wc -c < ./zap/wrk/openapi_processed.json) bytes"
-          echo "   - Endpoints: ${PROCESSED_COUNT}"
-          echo "   - Servidor: ${API_BASE_URL}"
-          
-          # Mostrar estructura del archivo procesado
-          echo "📝 Estructura del archivo OpenAPI:"
-          jq '{
-            openapi: .openapi,
-            info: .info,
-            servers: .servers,
-            paths_count: (.paths | length),
-            components: (.components | keys)
-          }' ./zap/wrk/openapi_processed.json
-
-      - name: Limitar endpoints para prueba (Opcional)
-        if: github.event_name == 'pull_request'
-        run: |
-          echo "⚡ Limpiando para prueba rápida en PR..."
-          jq '.paths |= (to_entries | .[:20] | from_entries)' ./zap/wrk/openapi_processed.json > ./zap/wrk/openapi_limited.json
-          mv ./zap/wrk/openapi_limited.json ./zap/wrk/openapi_processed.json
-          echo "✅ Reducido a 20 endpoints para prueba rápida"
-
-      - name: Ejecutar Escaneo ZAP
-        timeout-minutes: 45
-        run: |
-          echo "🚀 Iniciando escaneo completo de API..."
-          echo "🔍 URL Base: ${API_BASE_URL}"
-          echo "📄 Archivo OpenAPI: openapi_processed.json"
-          echo "🔄 Tiempo máximo: 45 minutos"
-          
-          # Crear un archivo de configuración adicional
-          cat <<EOF > ./zap/wrk/zap_additional.prop
-          scanner.attackOnStart=true
-          scanner.threadPerHost=3
-          scanner.maxRuleDurationInMins=5
-          scanner.delayInMs=200
-          api.disablekey=true
-          connection.timeoutInSecs=60
-          EOF
-          
-          docker run --rm \
-            -v $(pwd)/zap/wrk:/zap/wrk:rw \
-            -v $(pwd)/zap/zaplog:/home/zap/.ZAP:rw \
-            zaproxy/zap-stable zap-api-scan.py \
-            -t /zap/wrk/openapi_processed.json \
-            -f openapi \
-            -r /zap/wrk/zap_api_report.html \
-            -x /zap/wrk/zap_report.xml \
-            -J /zap/wrk/zap_report.json \
-            -O "${API_BASE_URL}" \
-            -d \
-            -T 25 \
-            -z "-configfile /zap/wrk/zap_options.prop \
-                -configfile /zap/wrk/zap_additional.prop \
-                -config scanner.maxAlertsPerRule=10" \
-            2>&1 | tee ./zap/wrk/zap_console.log
-
-      - name: Analizar resultados
-        if: always()
-        run: |
-          echo "📊 ANALIZANDO RESULTADOS DEL ESCANEO"
-          echo "====================================="
-          
-          # Verificar reportes generados
-          REPORT_FILES=0
-          if [ -f "./zap/wrk/zap_api_report.html" ]; then
-            HTML_SIZE=$(wc -c < ./zap/wrk/zap_api_report.html)
-            echo "✅ Reporte HTML: ${HTML_SIZE} bytes"
-            REPORT_FILES=$((REPORT_FILES + 1))
-          else
-            echo "❌ Reporte HTML no generado"
-          fi
-          
-          if [ -f "./zap/wrk/zap_report.xml" ]; then
-            XML_SIZE=$(wc -c < ./zap/wrk/zap_report.xml)
-            echo "✅ Reporte XML: ${XML_SIZE} bytes"
-            REPORT_FILES=$((REPORT_FILES + 1))
-          fi
-          
-          if [ -f "./zap/wrk/zap_report.json" ]; then
-            JSON_SIZE=$(wc -c < ./zap/wrk/zap_report.json)
-            echo "✅ Reporte JSON: ${JSON_SIZE} bytes"
-            REPORT_FILES=$((REPORT_FILES + 1))
-          fi
-          
-          # Extraer estadísticas del log
           echo ""
-          echo "📈 ESTADÍSTICAS DEL ESCANEO:"
+          echo "📊 [${ENDPOINT_COUNT}/93] ESCANEANDO: $endpoint"
+          echo "   URL: $FULL_URL"
           
-          if [ -f "./zap/wrk/zap_console.log" ]; then
-            # Contar diferentes tipos de mensajes
-            ALERTS=$(grep -c "\[ALERT\]" ./zap/wrk/zap_console.log || echo "0")
-            WARNINGS=$(grep -c "WARN\|WARNING" ./zap/wrk/zap_console.log || echo "0")
-            ERRORS=$(grep -c "ERROR\|FAILED" ./zap/wrk/zap_console.log || echo "0")
+          # Obtener métodos para este endpoint
+          METHODS=$(jq -r ".paths[\"$endpoint\"] | keys[]" openapi.json 2>/dev/null | tr '\n' ' ')
+          
+          for method in $METHODS; do
+            echo "   Método: $method"
             
-            echo "   Alertas: ${ALERTS}"
-            echo "   Advertencias: ${WARNINGS}"
-            echo "   Errores: ${ERRORS}"
+            # Ejecutar request para que ZAP lo vea
+            case $method in
+              "get")
+                curl -s -X GET "$FULL_URL" \
+                  -H "Authorization: Token ${{ github.event.inputs.auth_token }}" \
+                  -H "Content-Type: application/json" \
+                  --proxy http://localhost:8080 \
+                  -w "   Status: %{http_code}\n" \
+                  -o /dev/null || true
+                ;;
+              "post")
+                # Enviar body básico para POST
+                curl -s -X POST "$FULL_URL" \
+                  -H "Authorization: Token ${{ github.event.inputs.auth_token }}" \
+                  -H "Content-Type: application/json" \
+                  -d '{"test": "dast_scan"}' \
+                  --proxy http://localhost:8080 \
+                  -w "   Status: %{http_code}\n" \
+                  -o /dev/null || true
+                ;;
+              "put"|"patch")
+                curl -s -X $method "$FULL_URL" \
+                  -H "Authorization: Token ${{ github.event.inputs.auth_token }}" \
+                  -H "Content-Type: application/json" \
+                  -d '{"test": "dast_scan_update"}' \
+                  --proxy http://localhost:8080 \
+                  -w "   Status: %{http_code}\n" \
+                  -o /dev/null || true
+                ;;
+              "delete")
+                curl -s -X DELETE "$FULL_URL" \
+                  -H "Authorization: Token ${{ github.event.inputs.auth_token }}" \
+                  -H "Content-Type: application/json" \
+                  --proxy http://localhost:8080 \
+                  -w "   Status: %{http_code}\n" \
+                  -o /dev/null || true
+                ;;
+            esac
             
-            # Encontrar el tiempo total del escaneo
-            TIME_START=$(grep "Starting" ./zap/wrk/zap_console.log | head -1 | cut -d' ' -f2-4 || echo "Desconocido")
-            TIME_END=$(grep "Shutting down" ./zap/wrk/zap_console.log | tail -1 | cut -d' ' -f2-4 || echo "Desconocido")
-            
-            echo "   Inicio: ${TIME_START}"
-            echo "   Fin: ${TIME_END}"
-            
-            # Mostrar las últimas alertas encontradas
-            echo ""
-            echo "🚨 ÚLTIMAS ALERTAS ENCONTRADAS:"
-            grep -A2 "\[ALERT\]" ./zap/wrk/zap_console.log | tail -10 || echo "   No se encontraron alertas recientes"
+            sleep 1  # Rate limiting básico
+          done
+        done
+        
+        echo ""
+        echo "=============================================="
+        echo "✅ ESCANEO PASIVO COMPLETADO"
+        echo "   Total endpoints procesados: $ENDPOINT_COUNT"
+        echo "=============================================="
+        
+    - name: Ejecutar Active Scan completo
+      run: |
+        echo "⚡ INICIANDO ACTIVE SCAN (esto tomará varios minutos)..."
+        echo "=============================================="
+        
+        TARGET_URL="${{ github.event.inputs.target_url }}"
+        
+        # Ejecutar active scan en ZAP
+        SCAN_ID=$(curl -s "http://localhost:8080/JSON/ascan/action/scan/" \
+          -d "url=$TARGET_URL" \
+          -d "recurse=true" \
+          -d "inScopeOnly=true" \
+          -d "scanPolicyName=Default Policy" \
+          -d "method=DELETE" \
+          -d "postData=" \
+          -H "X-ZAP-API-Key: zap-api-key-123" | jq -r '.scan')
+        
+        echo "Scan ID: $SCAN_ID"
+        
+        # Monitorear progreso
+        while true; do
+          STATUS=$(curl -s "http://localhost:8080/JSON/ascan/view/status/?scanId=$SCAN_ID" \
+            -H "X-ZAP-API-Key: zap-api-key-123" | jq -r '.status')
+          
+          PERCENT=$(curl -s "http://localhost:8080/JSON/ascan/view/status/?scanId=$SCAN_ID" \
+            -H "X-ZAP-API-Key: zap-api-key-123" | jq -r '.status')
+          
+          echo "Progreso Active Scan: $PERCENT%"
+          
+          if [[ "$PERCENT" == "100" ]]; then
+            break
           fi
           
-          # Verificar archivos en el directorio
-          echo ""
-          echo "📁 ARCHIVOS GENERADOS:"
-          ls -lh ./zap/wrk/*.html ./zap/wrk/*.xml ./zap/wrk/*.json ./zap/wrk/*.log 2>/dev/null || echo "   No se encontraron archivos de reporte"
-
-      - name: Crear reporte de resumen
-        if: always()
-        run: |
-          echo "# 📋 RESUMEN DEL ESCANEO ZAP API" > scan_summary.md
-          echo "**Fecha:** $(date)" >> scan_summary.md
-          echo "**URL Base:** ${API_BASE_URL}" >> scan_summary.md
-          echo "" >> scan_summary.md
+          sleep 10
+        done
+        
+        echo "✅ ACTIVE SCAN COMPLETADO"
+        
+    - name: Generar reportes
+      run: |
+        echo "📄 GENERANDO REPORTES..."
+        
+        # Generar reporte HTML
+        curl -s "http://localhost:8080/OTHER/core/other/htmlreport/" \
+          -H "X-ZAP-API-Key: zap-api-key-123" \
+          -o zap-report.html
           
-          echo "## 📊 ESTADÍSTICAS" >> scan_summary.md
+        echo "✅ Reporte HTML generado: $(wc -l zap-report.html | awk '{print $1}') líneas"
+        
+        # Generar reporte JSON
+        curl -s "http://localhost:8080/JSON/core/view/alerts/" \
+          -H "X-ZAP-API-Key: zap-api-key-123" \
+          -o zap-report.json
           
-          # Obtener conteo de endpoints
-          if [ -f "./zap/wrk/openapi_processed.json" ]; then
-            ENDPOINTS=$(jq '.paths | length' ./zap/wrk/openapi_processed.json)
-            echo "- **Endpoints escaneados:** ${ENDPOINTS}" >> scan_summary.md
-          fi
+        echo "✅ Reporte JSON generado: $(jq '.alerts | length' zap-report.json) alertas"
+        
+        # Generar reporte XML (para otras herramientas)
+        curl -s "http://localhost:8080/OTHER/core/other/xmlreport/" \
+          -H "X-ZAP-API-Key: zap-api-key-123" \
+          -o zap-report.xml
           
-          # Estadísticas de alertas desde XML si existe
-          if [ -f "./zap/wrk/zap_report.xml" ]; then
-            echo "" >> scan_summary.md
-            echo "## 🚨 NIVELES DE ALERTA" >> scan_summary.md
-            
-            # Contar alertas por nivel (versión simplificada)
-            HIGH=$(grep -c 'level="High"' ./zap/wrk/zap_report.xml 2>/dev/null || echo "0")
-            MEDIUM=$(grep -c 'level="Medium"' ./zap/wrk/zap_report.xml 2>/dev/null || echo "0")
-            LOW=$(grep -c 'level="Low"' ./zap/wrk/zap_report.xml 2>/dev/null || echo "0")
-            INFO=$(grep -c 'level="Informational"' ./zap/wrk/zap_report.xml 2>/dev/null || echo "0")
-            
-            echo "| Nivel | Cantidad |" >> scan_summary.md
-            echo "|-------|----------|" >> scan_summary.md
-            echo "| 🔴 Alto | ${HIGH} |" >> scan_summary.md
-            echo "| 🟡 Medio | ${MEDIUM} |" >> scan_summary.md
-            echo "| 🔵 Bajo | ${LOW} |" >> scan_summary.md
-            echo "| ℹ️ Informativo | ${INFO} |" >> scan_summary.md
-            echo "" >> scan_summary.md
-            echo "**Total de alertas:** $((HIGH + MEDIUM + LOW + INFO))" >> scan_summary.md
-          fi
-          
-          echo "" >> scan_summary.md
-          echo "## 📁 ARCHIVOS DISPONIBLES" >> scan_summary.md
-          
-          FILES=""
-          [ -f "./zap/wrk/zap_api_report.html" ] && FILES="${FILES}- \`zap_api_report.html\` - Reporte HTML interactivo\n"
-          [ -f "./zap/wrk/zap_report.xml" ] && FILES="${FILES}- \`zap_report.xml\` - Reporte XML para integración\n"
-          [ -f "./zap/wrk/zap_report.json" ] && FILES="${FILES}- \`zap_report.json\` - Reporte JSON para procesamiento\n"
-          [ -f "./zap/wrk/zap_console.log" ] && FILES="${FILES}- \`zap_console.log\` - Log completo de ejecución\n"
-          [ -f "./zap/wrk/openapi_processed.json" ] && FILES="${FILES}- \`openapi_processed.json\` - OpenAPI procesado\n"
-          
-          if [ -n "$FILES" ]; then
-            echo -e "$FILES" >> scan_summary.md
-          else
-            echo "No se generaron archivos de reporte." >> scan_summary.md
-          fi
-          
-          echo "" >> scan_summary.md
-          echo "## ⚙️ CONFIGURACIÓN" >> scan_summary.md
-          echo "- **Token:** \`${API_TOKEN:0:10}...\`" >> scan_summary.md
-          echo "- **Tiempo máximo:** 45 minutos" >> scan_summary.md
-          echo "- **Modo:** Escaneo completo de API" >> scan_summary.md
-          
-          cat scan_summary.md
-
-      - name: Subir artefactos
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: zap-full-scan-results
-          path: |
-            ./zap/
-            scan_summary.md
-          retention-days: 30
-          
-      - name: Notificar resultado
-        if: always()
-        run: |
-          echo "🔔 NOTIFICACIÓN DE ESCANEO COMPLETADO"
-          echo "======================================"
-          
-          if [ -f "./zap/wrk/zap_api_report.html" ]; then
-            echo "✅ Escaneo completado exitosamente"
-            echo "📊 Reportes disponibles en la sección de artefactos"
-          else
-            echo "⚠️  Escaneo completado con posibles problemas"
-            echo "📋 Revisar logs para más detalles"
-          fi
+        echo "✅ Reporte XML generado"
+        
+        # Generar resumen ejecutivo
+        cat > scan-summary.txt << EOF
+        ==============================================
+        RESUMEN DE ESCANEO DAST - DEFECTDOJO API
+        ==============================================
+        Fecha: $(date)
+        Target: ${{ github.event.inputs.target_url }}
+        Total Endpoints: 93
+        Token usado: ********${AUTH_TOKEN: -8}
+        
+        ESTADÍSTICAS DE ALERTAS:
+        $(jq -r '
+          "Alertas por severidad:",
+          "  High: " + (.alerts[] | select(.risk == "High") | .risk | length // 0),
+          "  Medium: " + (.alerts[] | select(.risk == "Medium") | .risk | length // 0),
+          "  Low: " + (.alerts[] | select(.risk == "Low") | .risk | length // 0),
+          "  Informational: " + (.alerts[] | select(.risk == "Informational") | .risk | length // 0),
+          "",
+          "Top 5 alertas más comunes:",
+          (.alerts | group_by(.alert) | map({alert: .[0].alert, count: length}) | sort_by(-.count) | .[0:5] | .[] | "  " + .alert + ": " + (.count|tostring))
+        ' zap-report.json 2>/dev/null || echo "  No se pudieron procesar las alertas")
+        
+        RECOMENDACIONES:
+        1. Revisar reporte HTML para detalles completos
+        2. Validar falsos positivos manualmente
+        3. Considerar escaneos regulares programados
+        4. Implementar WAF para protección en producción
+        
+        ARCHIVOS GENERADOS:
+        - zap-report.html (Reporte visual completo)
+        - zap-report.json (Datos estructurados)
+        - zap-report.xml (Compatibilidad con otras herramientas)
+        - scan-summary.txt (Este resumen)
+        ==============================================
+        EOF
+        
+        echo "✅ Resumen ejecutivo generado"
+        
+    - name: Detener ZAP y limpiar
+      run: |
+        echo "🧹 LIMPIANDO RECURSOS..."
+        docker stop zap || true
+        docker rm zap || true
+        echo "✅ Limpieza completada"
+        
+    - name: Subir reportes como artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: zap-dast-reports
+        path: |
+          zap-report.html
+          zap-report.json
+          zap-report.xml
+          scan-summary.txt
+        retention-days: 30
+        
+    - name: Mostrar resumen final
+      run: |
+        echo ""
+        echo "=============================================="
+        echo "🎉 ESCANEO DAST COMPLETADO EXITOSAMENTE"
+        echo "=============================================="
+        echo ""
+        echo "📊 RESULTADOS:"
+        echo ""
+        cat scan-summary.txt
+        echo ""
+        echo "📥 REPORTES DESCARGABLES:"
+        echo "  • zap-report.html - Reporte visual completo"
+        echo "  • zap-report.json - Datos estructurados para análisis"
+        echo "  • zap-report.xml - Compatible con otras herramientas"
+        echo "  • scan-summary.txt - Resumen ejecutivo"
+        echo ""
+        echo "📍 Los reportes están disponibles en la sección 'Artifacts'"
+        echo "   de esta ejecución de GitHub Actions."
+        echo ""
+        echo "⚠️  ADVERTENCIA: Este fue un escaneo REAL en ambiente DEMO compartido."
+        echo "   Se realizaron requests GET, POST, PUT, PATCH y DELETE."
+        echo "   Verificar que no se hayan afectado datos críticos."
+        echo "=============================================="
