@@ -1,36 +1,104 @@
-name: ZAP API Scan Minimal
-on: workflow_dispatch
+name: DAST API Scan Simple
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      auth_token:
+        description: 'Token de autenticación'
+        required: true
+        default: '548afd6fab3bea9794a41b31da0e9404f733e222'
 
 jobs:
-  scan:
+  zap_scan:
     runs-on: ubuntu-latest
     
     steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
     - name: Setup
       run: |
-        echo "🚀 START"
+        echo "🚀 [START] Setup inicial"
+        echo "TIMESTAMP=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
         mkdir -p ./zap/wrk
+        echo "✅ Directorio creado: ./zap/wrk"
         
-    - name: Run ZAP
+    - name: Pull Docker image
       run: |
-        echo "🔍 RUNNING ZAP"
+        echo "⬇️  [PULL] Descargando imagen ZAP"
+        echo "🔍 Imagen: zaproxy/zap-weekly"
+        docker pull zaproxy/zap-weekly
+        echo "✅ Imagen descargada"
         
+    - name: Run ZAP API Scan
+      run: |
+        echo "🔍 [SCAN] Iniciando escaneo API"
+        
+        # Configuración
         TOKEN="${{ github.event.inputs.auth_token }}"
+        OPENAPI_URL="https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/refs/heads/main/openapi.json"
+        API_BASE="https://demo.defectdojo.org"
+        REPORT="zap-report-${{ env.TIMESTAMP }}"
         
+        echo "🎯 Target: $OPENAPI_URL"
+        echo "🏠 API Base: $API_BASE"
+        echo "📄 Reporte: $REPORT.html"
+        
+        # Configurar autenticación
+        ZAP_AUTH="-config replacer.full_list\\(0\\).description=auth"
+        ZAP_AUTH="$ZAP_AUTH -config replacer.full_list\\(0\\).enabled=true"
+        ZAP_AUTH="$ZAP_AUTH -config replacer.full_list\\(0\\).matchtype=REQ_HEADER"
+        ZAP_AUTH="$ZAP_AUTH -config replacer.full_list\\(0\\).matchstr=Authorization"
+        ZAP_AUTH="$ZAP_AUTH -config replacer.full_list\\(0\\).replacement=Token $TOKEN"
+        
+        echo "🔐 Auth configurada"
+        
+        # Ejecutar ZAP
+        echo "⚡ Ejecutando ZAP..."
         docker run --rm \
           -v $(pwd)/zap/wrk:/zap/wrk:rw \
           zaproxy/zap-weekly python3 /zap/zap-api-scan.py \
-          -t "https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/refs/heads/main/openapi.json" \
+          -t "$OPENAPI_URL" \
           -f openapi \
-          -z "-config replacer.full_list\\(0\\).matchstr=Authorization -config replacer.full_list\\(0\\).replacement=Token $TOKEN" \
-          -O "https://demo.defectdojo.org" \
-          -r report.html \
-          -s -I
+          -z "$ZAP_AUTH" \
+          -O "$API_BASE" \
+          -r "$REPORT.html" \
+          -J "$REPORT.json" \
+          -s -I || echo "⚠️  ZAP exit code: $?"
         
-        echo "✅ DONE"
+        echo "✅ Escaneo completado"
         
-    - name: Upload
+    - name: Check results
+      run: |
+        echo "📋 [CHECK] Verificando resultados"
+        
+        if [ -f "./zap/wrk/zap-report-${{ env.TIMESTAMP }}.html" ]; then
+          echo "✅ HTML report generado"
+          ls -lh "./zap/wrk/zap-report-${{ env.TIMESTAMP }}.html"
+        else
+          echo "❌ No se generó reporte HTML"
+        fi
+        
+        if [ -f "./zap/wrk/zap-report-${{ env.TIMESTAMP }}.json" ]; then
+          echo "✅ JSON report generado"
+          ls -lh "./zap/wrk/zap-report-${{ env.TIMESTAMP }}.json"
+        else
+          echo "❌ No se generó reporte JSON"
+        fi
+        
+        echo "📁 Contenido del directorio:"
+        ls -la ./zap/wrk/ || echo "No se pudo listar"
+        
+    - name: Upload reports
       uses: actions/upload-artifact@v4
       with:
-        name: zap-scan
+        name: zap-reports-${{ env.TIMESTAMP }}
         path: ./zap/wrk/
+        retention-days: 30
+        
+    - name: Finish
+      run: |
+        echo "🎉 [FINISH] Workflow completado"
+        echo "📥 Reportes disponibles en: Artifacts → zap-reports-${{ env.TIMESTAMP }}"
