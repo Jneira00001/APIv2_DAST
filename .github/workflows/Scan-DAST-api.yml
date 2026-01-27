@@ -1,4 +1,4 @@
-name: DAST Scan (Python Loader)
+name: DefectDojo Scan (Fixed with Python)
 
 on:
   push:
@@ -6,13 +6,13 @@ on:
   workflow_dispatch:
 
 env:
-  # Token de DefectDojo (API Key)
+  # Token de DefectDojo (Demo)
   DOJO_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
   
-  # Tu URL del JSON en GitHub (Raw)
+  # URL de tu archivo en GitHub
   OPENAPI_URL: "https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/main/openapi.json"
   
-  # El Servidor Destino
+  # El servidor real donde haremos el ataque
   API_TARGET: "https://demo.defectdojo.org"
 
 jobs:
@@ -28,62 +28,52 @@ jobs:
           chmod 777 ./zap/wrk
           echo "TIMESTAMP=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
 
-      # 1. SCRIPT PYTHON: Descarga, Valida y Parchea el JSON
-      # Este paso reemplaza a curl y jq para evitar errores de archivo vacío.
-      - name: 🐍 Descargar y Parchear JSON con Python
+      # 1. PYTHON AL RESCATE 🐍
+      # Este paso descarga el JSON y le ESCRIBE la URL del servidor dentro.
+      # Así ZAP no tiene excusa para decir "0 URLs".
+      - name: 📥 Descargar y Corregir JSON
         shell: python
         env:
-          URL_ORIGEN: ${{ env.OPENAPI_URL }}
-          URL_DESTINO: ${{ env.API_TARGET }}
+          URL_JSON: ${{ env.OPENAPI_URL }}
+          URL_SERVER: ${{ env.API_TARGET }}
         run: |
           import os
           import json
           import urllib.request
           import sys
 
-          print("⬇️ Iniciando descarga desde Python...")
-          url = os.environ['URL_ORIGEN']
-          target_server = os.environ['URL_DESTINO']
-          file_path = "./zap/wrk/ready.json"
-
+          print("--- INICIANDO CORRECCIÓN DEL JSON ---")
+          
+          # 1. Descargar
+          url = os.environ['URL_JSON']
+          print(f"⬇️ Descargando de: {url}")
           try:
-              # 1. Descargar
               with urllib.request.urlopen(url) as response:
-                  if response.status != 200:
-                      print(f"❌ Error HTTP: {response.status}")
-                      sys.exit(1)
-                  data = response.read()
-                  
-              # 2. Parsear JSON
-              try:
-                  json_content = json.loads(data)
-              except json.JSONDecodeError as e:
-                  print(f"❌ Error: Lo descargado NO es un JSON válido.\n{e}")
-                  print(f"Contenido parcial: {data[:100]}")
-                  sys.exit(1)
-
-              # 3. Validar contenido
-              paths_count = len(json_content.get("paths", {}))
-              print(f"✅ JSON válido. Rutas encontradas: {paths_count}")
-              
-              if paths_count == 0:
-                  print("⚠️ ADVERTENCIA: El objeto 'paths' está vacío. ZAP no encontrará nada.")
-
-              # 4. Inyectar Servidor (El truco mágico)
-              print(f"🔧 Inyectando servidor: {target_server}")
-              json_content["servers"] = [{"url": target_server}]
-
-              # 5. Guardar archivo final
-              with open(file_path, 'w') as f:
-                  json.dump(json_content, f, indent=2)
-              
-              print(f"✅ Archivo guardado correctamente en: {file_path}")
-
+                  content = response.read()
+                  data = json.loads(content)
           except Exception as e:
-              print(f"❌ Error fatal en el script: {e}")
+              print(f"❌ Error descargando/leyendo JSON: {e}")
               sys.exit(1)
 
-      # 2. Configurar Auth ZAP
+          # 2. Diagnóstico
+          paths = data.get("paths", {})
+          print(f"✅ Rutas encontradas en el archivo original: {len(paths)}")
+          
+          # 3. INYECCIÓN QUIRÚRGICA DEL SERVIDOR
+          target = os.environ['URL_SERVER']
+          print(f"🔧 Inyectando bloque 'servers' con: {target}")
+          
+          # Sobrescribimos o creamos la lista de servidores
+          data["servers"] = [{"url": target}]
+
+          # 4. Guardar archivo final corregido
+          output_path = "./zap/wrk/ready.json"
+          with open(output_path, 'w') as f:
+              json.dump(data, f, indent=2)
+          
+          print(f"✅ Archivo guardado en {output_path}. ¡Listo para escanear!")
+
+      # 2. Configurar Autenticación
       - name: Configurar Auth ZAP
         run: |
           cat <<EOF > ./zap/wrk/zap_options.prop
@@ -95,26 +85,25 @@ jobs:
           EOF
           chmod 777 ./zap/wrk/zap_options.prop
 
-      # 3. EJECUTAR ZAP
+      # 3. EJECUTAR ZAP (Weekly)
       - name: Ejecutar Escaneo ZAP
         run: |
-          echo "🚀 Iniciando escaneo ZAP..."
+          echo "🚀 Iniciando escaneo..."
           
-          # NOTA: 
-          # - Quitamos el flag -O porque Python ya inyectó la URL en el archivo.
-          # - Usamos -S (Safe Mode) para que no tarde 20 horas.
+          # Usamos zap-weekly porque tiene mejor soporte para OpenAPI 3.0.3
+          # Usamos -S (Safe Mode) para escanear rápido las 500 URLs
           
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
-            zaproxy/zap-stable zap-api-scan.py \
+            zaproxy/zap-weekly zap-api-scan.py \
             -t /zap/wrk/ready.json \
             -f openapi \
             -z "-configfile /zap/wrk/zap_options.prop" \
             -S \
-            -r /zap/wrk/reporte-final.html \
-            -J /zap/wrk/reporte-final.json \
+            -r /zap/wrk/reporte.html \
+            -J /zap/wrk/reporte.json \
             -l WARN \
-            || echo "⚠️ ZAP terminó (verifica reporte)."
+            || echo "⚠️ ZAP finalizó."
 
       - name: Verificar y Subir
         if: always()
