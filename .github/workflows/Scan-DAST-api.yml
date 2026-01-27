@@ -1,4 +1,4 @@
-name: DAST API Security Scan - DefectDojo Demo
+name: DAST API Security Scan - DefectDojo Demoo
 
 on:
   workflow_dispatch:  # Solo ejecución manual
