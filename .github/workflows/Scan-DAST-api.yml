@@ -1,4 +1,4 @@
-name: Debug Paths & Scan (Corregido)
+name: DefectDojo Scan (Anti-Bot Fix)
 
 on:
   push:
@@ -6,59 +6,23 @@ on:
   workflow_dispatch:
 
 env:
+  # ⚠️ En entornos reales esto debe ir en secrets
   MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
   SOURCE_URL: "https://demo.defectdojo.org/api/v2/oa3/schema/?format=json"
 
 jobs:
-  debug_and_scan:
+  zap_scan:
     runs-on: ubuntu-latest
+
     steps:
       - name: Descargar Código
         uses: actions/checkout@v4
 
-      - name: Preparar directorios
+      - name: Preparar directorios ZAP
         run: |
           mkdir -p ./zap/wrk
-          chmod 777 ./zap/wrk
+          chmod 755 ./zap/wrk
 
-      # 1. DESCARGAMOS EL ARCHIVO (Modo Camuflaje)
-      - name: Descargar Swagger
-        run: |
-          echo "⬇️ Descargando archivo..."
-          curl -s -L -A "Mozilla/5.0" \
-            -H "Authorization: Token ${MY_TOKEN}" \
-            "$SOURCE_URL" > ./zap/wrk/full_schema.json
-          
-          # Validación básica
-          if [[ $(head -n 1 ./zap/wrk/full_schema.json) != *"{"* ]]; then
-             echo "❌ Error: El archivo descargado no es un JSON válido."
-             head -n 5 ./zap/wrk/full_schema.json
-             exit 1
-          fi
-
-          chmod 777 ./zap/wrk/full_schema.json
-          echo "✅ Archivo descargado correctamente."
-
-      # 2. PRUEBA EN EL HOST (GITHUB RUNNER)
-      - name: 🕵️ Test 1 - Validar ruta en el Host
-        run: |
-          echo "📂 Listando carpeta local ./zap/wrk/ :"
-          ls -la ./zap/wrk/
-
-      # 3. PRUEBA DENTRO DE DOCKER (LA PRUEBA DE FUEGO)
-      # Esta es la línea que te daba error. Ahora está corregida.
-      - name: 🕵️ Test 2 - Validar ruta DENTRO de Docker
-        run: |
-          echo "🐳 Iniciando contenedor de prueba..."
-          echo "Objetivo: Ver si /zap/wrk/full_schema.json existe dentro del contenedor."
-          
-          # Montamos el volumen y ejecutamos 'ls' dentro
-          docker run --rm -u 0 \
-            -v $(pwd)/zap/wrk:/zap/wrk:rw \
-            zaproxy/zap-stable \
-            bash -c "ls -la /zap/wrk/ && echo '--- CHECK ---' && [ -f /zap/wrk/full_schema.json ] && echo '✅ ARCHIVO ENCONTRADO' || echo '❌ ARCHIVO NO ENCONTRADO'"
-
-      # 4. CONFIGURAR AUTH
       - name: Configurar Auth ZAP
         run: |
           cat <<EOF > ./zap/wrk/zap_options.prop
@@ -68,7 +32,7 @@ jobs:
           replacer.full_list(0).matchstr=Authorization
           replacer.full_list(0).regex=false
           replacer.full_list(0).replacement=Token ${MY_TOKEN}
-          
+
           replacer.full_list(1).description=AcceptJson
           replacer.full_list(1).enabled=true
           replacer.full_list(1).matchtype=REQ_HEADER
@@ -76,31 +40,48 @@ jobs:
           replacer.full_list(1).regex=false
           replacer.full_list(1).replacement=application/json
           EOF
-          chmod 777 ./zap/wrk/zap_options.prop
+          chmod 644 ./zap/wrk/zap_options.prop
 
-      # 5. EJECUTAR ESCANEO REAL
+      - name: Descargar Swagger (Modo Camuflaje)
+        run: |
+          echo "⬇️ Descargando OpenAPI con User-Agent real..."
+
+          curl -s -L \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            -H "Authorization: Token ${MY_TOKEN}" \
+            "$SOURCE_URL" > full_schema.json
+
+          echo "🔎 Validando contenido descargado..."
+          head -n 5 full_schema.json
+
+          if [[ $(head -n 1 full_schema.json) != *"{"* ]]; then
+            echo "❌ El archivo descargado no es JSON válido (posible WAF)"
+            exit 1
+          fi
+
+          mv full_schema.json ./zap/wrk/schema.json
+          chmod 644 ./zap/wrk/schema.json
+          echo "✅ OpenAPI descargado correctamente."
+
       - name: Ejecutar Escaneo ZAP
         run: |
-          echo "🚀 Rutas validadas. Iniciando ZAP..."
-          
-          # NOTA IMPORTANTE DE RUTA:
-          # Usamos /zap/wrk/full_schema.json (Ruta absoluta DENTRO del contenedor)
-          # NO USAR ./zap/wrk/...
-          
+          echo "🚀 Iniciando escaneo ZAP API..."
+
+          TIMESTAMP=$(date +'%Y-%m-%d_%H-%M-%S')
+
           docker run --rm -u 0 \
-              -v $(pwd)/zap/wrk:/zap/wrk:rw \
-              zaproxy/zap-stable zap-api-scan.py \
-              -t /zap/wrk/full_schema.json \
-              -f openapi \
-              -r /zap/wrk/reporte-final.html \
-              -O "https://demo.defectdojo.org" \
-              -z "-configfile /zap/wrk/zap_options.prop" \
-              -S \
-              2>&1 | tee ./zap/wrk/zap_console.log
+            -v $(pwd)/zap/wrk:/zap/wrk:rw \
+            zaproxy/zap-stable zap-api-scan.py \
+            -t /zap/wrk/schema.json \
+            -f openapi \
+            -O "https://demo.defectdojo.org" \
+            -r /zap/wrk/reporte-defectdojo-${TIMESTAMP}.html \
+            -z "-configfile /zap/wrk/zap_options.prop -config api.debug=true" \
+            2>&1 | tee ./zap/wrk/zap_console.log
 
       - name: Subir Reporte
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-Validado
-          path: ./zap/wrk/reporte-final.html
+          name: Reporte-Final-DefectDojo
+          path: ./zap/wrk/reporte-defectdojo-*.html
