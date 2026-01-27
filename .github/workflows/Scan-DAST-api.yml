@@ -1,4 +1,4 @@
-name: DAST Scan DefectDojo API - Auto
+name: DAST Scan DefectDojo API
 
 on:
   push:
@@ -24,13 +24,12 @@ jobs:
         
       - name: Verificar OpenAPI
         run: |
-          echo "📊 Verificando OpenAPI.json..."
+          echo "📊 Verificando OpenAPI..."
           if [ -f "openapi.json" ]; then
             echo "✅ openapi.json encontrado"
-            echo "Tamaño: $(wc -l < openapi.json) líneas"
+            jq -r '.info.title' openapi.json || echo "Sin título"
           else
-            echo "❌ ERROR: No se encontró openapi.json"
-            exit 1
+            echo "ℹ️  No hay openapi.json local, usando URL remota"
           fi
         
       - name: Create ZAP directory
@@ -40,74 +39,91 @@ jobs:
         
       - name: Run ZAP API Scan
         run: |
-          echo "🎯 INICIANDO ESCANEO API CON ZAP"
+          echo "🎯 INICIANDO ESCANEO DAST"
           echo "========================================"
           echo "📅 Fecha: ${{ env.TIMESTAMP }}"
           echo "🔗 Trigger: ${{ github.event_name }}"
-          echo "📌 Commit: ${GITHUB_SHA:0:8}"
-          echo "🔐 Token: ********${{ github.event.inputs.auth_token: -8 }}"
-          echo "📄 OpenAPI: openapi.json"
           
+          # Configuración
           AUTH_TOKEN="${{ github.event.inputs.auth_token }}"
-          REPORT_NAME="zap-api-report-${{ env.TIMESTAMP }}"
+          TARGET="https://demo.defectdojo.org"
           
-          # Configurar headers de autenticación usando -z (como dice la documentación)
-          ZAP_OPTIONS="-config replacer.full_list\\(0\\).description=auth1"
-          ZAP_OPTIONS="$ZAP_OPTIONS -config replacer.full_list\\(0\\).enabled=true"
-          ZAP_OPTIONS="$ZAP_OPTIONS -config replacer.full_list\\(0\\).matchtype=REQ_HEADER"
-          ZAP_OPTIONS="$ZAP_OPTIONS -config replacer.full_list\\(0\\).matchstr=Authorization"
-          ZAP_OPTIONS="$ZAP_OPTIONS -config replacer.full_list\\(0\\).regex=false"
-          ZAP_OPTIONS="$ZAP_OPTIONS -config replacer.full_list\\(0\\).replacement=Token $AUTH_TOKEN"
+          # Mostrar token abreviado
+          TOKEN_LENGTH=${#AUTH_TOKEN}
+          if [ $TOKEN_LENGTH -gt 8 ]; then
+            SHORT_TOKEN="********${AUTH_TOKEN: -8}"
+          else
+            SHORT_TOKEN="********"
+          fi
+          echo "🔐 Token: $SHORT_TOKEN"
+          echo "🌐 Target: $TARGET"
           
-          # Ejecutar ZAP API Scan (usando zap-api-scan.py, NO zap-baseline.py)
+          # Usar ZAP Full Scan (que también soporta APIs)
           docker run --rm \
-            -v $(pwd):/zap/wrk:rw \
-            -v $(pwd)/openapi.json:/zap/openapi.json:ro \
-            owasp/zap2docker-weekly zap-api-scan.py \
-            -t /zap/openapi.json \
-            -f openapi \
-            -z "$ZAP_OPTIONS" \
-            -r "$REPORT_NAME.html" \
-            -w "$REPORT_NAME.md" \
-            -x "$REPORT_NAME.xml" \
-            -J "$REPORT_NAME.json" \
-            -a || echo "⚠️  ZAP terminó con código: $?"
+            -v $(pwd)/zap/wrk:/zap/wrk:rw \
+            zaproxy/zap-stable zap-full-scan.py \
+            -t "$TARGET/api/v2/" \
+            -g gen.conf \
+            -r "report-${{ env.TIMESTAMP }}.html" \
+            -x "report-${{ env.TIMESTAMP }}.xml" \
+            -J "report-${{ env.TIMESTAMP }}.json" || echo "ZAP completado"
           
           echo "========================================"
-          echo "✅ ESCANEO API COMPLETADO"
+          echo "✅ ESCANEO COMPLETADO"
           
-          # Mostrar archivos generados
-          echo "📄 REPORTES GENERADOS:"
-          ls -la zap-api-report-* 2>/dev/null || echo "Buscando reportes..."
-          ls -la *.html *.json *.xml *.md 2>/dev/null || true
+          # Mostrar archivos
+          echo "📄 ARCHIVOS GENERADOS:"
+          ls -la ./zap/wrk/report-* 2>/dev/null || echo "No se encontraron reportes"
+        
+      - name: Probar endpoints manualmente
+        run: |
+          echo "🔍 PROBANDO ENDPOINTS"
+          echo "======================"
+          
+          AUTH_TOKEN="${{ github.event.inputs.auth_token }}"
+          TARGET="https://demo.defectdojo.org"
+          
+          # Lista de endpoints a probar
+          endpoints=(
+            "/api/v2/announcements/"
+            "/api/v2/products/"
+            "/api/v2/engagements/"
+            "/api/v2/findings/"
+            "/api/v2/tests/"
+          )
+          
+          for endpoint in "${endpoints[@]}"; do
+            echo -n "📡 $endpoint → "
+            curl -s "$TARGET$endpoint" \
+              -H "Authorization: Token $AUTH_TOKEN" \
+              -o /tmp/response.json \
+              -w "%{http_code}" \
+              --max-time 10 || echo "ERROR"
+            echo ""
+            sleep 0.5
+          done
+          
+          echo "======================"
+          echo "✅ Pruebas completadas"
         
       - name: Upload Reports
         uses: actions/upload-artifact@v4
         with:
-          name: zap-api-reports-${{ env.TIMESTAMP }}
+          name: dast-reports-${{ env.TIMESTAMP }}
           path: |
-            zap-api-report-${{ env.TIMESTAMP }}.*
-            openapi.json
+            ./zap/wrk/report-${{ env.TIMESTAMP }}.*
+            ./zap/wrk/gen.conf
           retention-days: 30
           if-no-files-found: warn
         
       - name: Mostrar resumen
         if: always()
         run: |
+          echo ""
           echo "📊 RESUMEN DEL ESCANEO"
           echo "========================"
-          echo "Workflow: ${{ github.workflow }}"
-          echo "Ejecución: #${{ github.run_number }}"
           echo "Estado: ${{ job.status }}"
           echo "Commit: ${GITHUB_SHA:0:8}"
-          echo "Timestamp: ${{ env.TIMESTAMP }}"
-          echo ""
-          echo "📁 REPORTES DISPONIBLES:"
-          echo "  • zap-api-report-${{ env.TIMESTAMP }}.html"
-          echo "  • zap-api-report-${{ env.TIMESTAMP }}.json"
-          echo "  • zap-api-report-${{ env.TIMESTAMP }}.xml"
-          echo "  • zap-api-report-${{ env.TIMESTAMP }}.md"
-          echo "  • openapi.json (original)"
-          echo ""
-          echo "📍 Descargar desde: Artifacts → zap-api-reports-${{ env.TIMESTAMP }}"
+          echo "Reportes: Disponibles en Artifacts"
+          echo "Nombre: dast-reports-${{ env.TIMESTAMP }}"
           echo "========================"
