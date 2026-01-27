@@ -1,4 +1,4 @@
-name: DefectDojo Scan (FULL - Todos los Endpoints)
+name: DefectDojo Scan (Fixed JSON Injection)
 
 on:
   push:
@@ -6,15 +6,20 @@ on:
   workflow_dispatch:
 
 env:
-  # Tu token confiable
+  # Token fijo
   MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
-  SOURCE_URL: "https://demo.defectdojo.org/api/v2/oa3/schema/?format=json"
+  
+  # ⚠️ URL CORREGIDA: Usamos la estructura estándar "raw" de GitHub (sin refs/heads)
+  OPENAPI_URL: "https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/main/openapi.json"
+  
+  # El objetivo
+  API_TARGET: "https://demo.defectdojo.org"
 
 jobs:
   zap_scan:
     runs-on: ubuntu-latest
     steps:
-      - name: Descargar Código
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Preparar directorios
@@ -22,6 +27,7 @@ jobs:
           mkdir -p ./zap/wrk
           chmod 777 ./zap/wrk
 
+      # 1. Configurar Auth (Archivo .prop)
       - name: Configurar Auth ZAP
         run: |
           cat <<EOF > ./zap/wrk/zap_options.prop
@@ -29,7 +35,6 @@ jobs:
           replacer.full_list(0).enabled=true
           replacer.full_list(0).matchtype=REQ_HEADER
           replacer.full_list(0).matchstr=Authorization
-          replacer.full_list(0).regex=false
           replacer.full_list(0).replacement=Token ${MY_TOKEN}
           
           replacer.full_list(1).description=AcceptJson
@@ -41,50 +46,61 @@ jobs:
           EOF
           chmod 777 ./zap/wrk/zap_options.prop
 
-      - name: Descargar Swagger (Modo Camuflaje)
+      # 2. DESCARGAR Y MODIFICAR EL JSON
+      - name: Preparar Definición OpenAPI
         run: |
-          echo "⬇️ Descargando Swagger completo..."
+          echo "⬇️ Descargando JSON..."
+          curl -sL "$OPENAPI_URL" -o ./zap/wrk/raw_schema.json
           
-          # 1. Descarga con "disfraz" de navegador para evitar bloqueo 403
-          curl -s -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            -H "Authorization: Token ${MY_TOKEN}" \
-            "$SOURCE_URL" > full_schema.json
-          
-          # 2. Validación rápida
-          if [[ $(head -n 1 full_schema.json) != *"{"* ]]; then
-             echo "❌ ALERTA: El archivo no parece un JSON válido."
-             echo "   Contenido sospechoso detectado. Posible bloqueo de WAF/Cloudflare."
+          # Validación de seguridad: Verificar si bajamos un JSON real
+          if ! grep -q "openapi" ./zap/wrk/raw_schema.json; then
+             echo "❌ ERROR: El archivo descargado no es un OpenAPI válido."
+             echo "   Contenido (primeras 5 lineas):"
+             head -n 5 ./zap/wrk/raw_schema.json
              exit 1
           fi
 
-          # 3. CAMBIO IMPORTANTE: YA NO RECORTAMOS CON JQ
-          echo "✅ Usando el esquema COMPLETO (Sin recortar)..."
-          mv full_schema.json ./zap/wrk/full_schema.json
-          chmod 777 ./zap/wrk/full_schema.json
-
-      - name: Ejecutar Escaneo ZAP (Completo)
-        run: |
-          echo "🚀 Iniciando escaneo de TODOS los endpoints..."
-          echo "ℹ️ Usando flag -S para evitar timeouts en GitHub Actions."
+          echo "🔧 Inyectando servidor 'demo.defectdojo.org' en el JSON..."
           
-          # CAMBIOS:
-          # 1. -t apunta a full_schema.json (todos los endpoints)
-          # 2. Agregamos -S (Safe Mode). Sin esto, el escaneo de 500 URLs tardaría +18 horas.
+          # TRUCO DE MAGIA CON JQ:
+          # Le agregamos el bloque "servers" al JSON para que ZAP no se pierda.
+          jq --arg target "$API_TARGET" '.servers = [{"url": $target}]' ./zap/wrk/raw_schema.json > ./zap/wrk/ready.json
+          
+          chmod 777 ./zap/wrk/ready.json
+          
+          echo "📝 Verificando inyección (debe aparecer 'servers'):"
+          grep -A 3 "servers" ./zap/wrk/ready.json || echo "⚠️ No se pudo hacer grep, pero continuamos."
+
+      # 3. EJECUTAR ESCANEO (Usando el archivo inyectado)
+      - name: Ejecutar Escaneo ZAP
+        run: |
+          echo "🚀 Iniciando escaneo..."
+          
+          # Usamos el archivo ./zap/wrk/ready.json que ya tiene el servidor correcto.
+          # Mantenemos -S (Safe Mode) para evitar bloqueos del WAF en 500 URLs.
           
           docker run --rm -u 0 \
               -v $(pwd)/zap/wrk:/zap/wrk:rw \
               zaproxy/zap-stable zap-api-scan.py \
-              -t /zap/wrk/full_schema.json \
+              -t /zap/wrk/ready.json \
               -f openapi \
-              -r /zap/wrk/reporte-completo.html \
-              -O "https://demo.defectdojo.org" \
+              -r /zap/wrk/reporte-final.html \
               -z "-configfile /zap/wrk/zap_options.prop" \
               -S \
               2>&1 | tee ./zap/wrk/zap_console.log
+
+      - name: Verificar Resultado
+        run: |
+          if [ -f "./zap/wrk/reporte-final.html" ]; then
+             echo "✅ ¡ÉXITO! Reporte generado."
+          else
+             echo "❌ Fallo: No hay reporte."
+             exit 1
+          fi
 
       - name: Subir Reporte
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-Final-Completo
-          path: ./zap/wrk/reporte-completo.html
+          name: Reporte-DefectDojo
+          path: ./zap/wrk/reporte-final.html
