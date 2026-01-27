@@ -32,7 +32,7 @@ jobs:
           echo "✅ Archivo descargado."
 
       # 2. PRUEBA EN EL HOST (GITHUB RUNNER)
-      - name: 🕵️ Test 1: Validar ruta en el Runner (Host)
+      - name: Validar ruta en el Runner (Host)
         run: |
           echo "📂 Listando carpeta local ./zap/wrk/ :"
           ls -la ./zap/wrk/
