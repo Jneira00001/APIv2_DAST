@@ -1,4 +1,4 @@
-name: DAST API Scan (Corregido)
+name: DAST API Scan (Corregido )
 
 on:
   push:
