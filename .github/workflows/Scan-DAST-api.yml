@@ -1,4 +1,4 @@
-name: DAST Scan (Final - Token Fijo)
+name: DAST Scan (Fix Local File)
 
 on:
   push:
@@ -6,15 +6,13 @@ on:
   workflow_dispatch:
 
 env:
-  # 1. EL TOKEN PARA DEFECTDOJO (Necesario para escanear, NO para descargar el JSON)
-  # Lo ponemos fijo aquí para asegurar que NUNCA llegue vacío.
+  # Token fijo (El que sabemos que funciona para atacar la API)
   DOJO_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
   
-  # 2. TU URL PÚBLICA (La que subiste a tu repo)
-  # ZAP descargará esto libremente.
+  # Tu URL pública del JSON
   OPENAPI_URL: "https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/refs/heads/main/openapi.json"
   
-  # 3. EL DESTINO
+  # El objetivo real
   API_BASE: "https://demo.defectdojo.org"
 
 jobs:
@@ -30,24 +28,24 @@ jobs:
           chmod 777 ./zap/wrk
           echo "TIMESTAMP=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
 
-      # PASO DE DIAGNÓSTICO: Verificar que el Token NO esté vacío
-      - name: 🔍 Verificar Variables
+      # --- PASO NUEVO: DESCARGAR EL JSON ---
+      # Esto evita que ZAP escanee GitHub. Lo bajamos a un archivo local.
+      - name: Descargar Definición OpenAPI
         run: |
-          echo "1. URL del JSON: $OPENAPI_URL"
-          echo "2. URL Base: $API_BASE"
+          echo "⬇️ Descargando archivo JSON desde GitHub..."
+          curl -sL "$OPENAPI_URL" -o ./zap/wrk/openapi_local.json
           
-          if [ -z "$DOJO_TOKEN" ]; then
-            echo "❌ ERROR CRÍTICO: La variable DOJO_TOKEN está vacía."
-            exit 1
-          else
-            echo "✅ Token cargado correctamente (Longitud: ${#DOJO_TOKEN} caracteres)."
+          # Verificamos que bajó bien
+          if [[ $(head -n 1 ./zap/wrk/openapi_local.json) != *"{"* ]]; then
+             echo "❌ Error: Lo que bajamos no es un JSON."
+             exit 1
           fi
+          
+          chmod 777 ./zap/wrk/openapi_local.json
+          echo "✅ Archivo guardado en: ./zap/wrk/openapi_local.json"
 
-      # PASO CRÍTICO: Configurar ZAP para usar el Token contra DefectDojo
       - name: Configurar Auth ZAP
         run: |
-          # Creamos el archivo de configuración.
-          # Esto le dice a ZAP: "Cuando hables con la API, usa este header Authorization"
           cat <<EOF > ./zap/wrk/zap_options.prop
           replacer.full_list(0).description=auth
           replacer.full_list(0).enabled=true
@@ -57,23 +55,20 @@ jobs:
           EOF
           chmod 777 ./zap/wrk/zap_options.prop
 
-      # EJECUTAR ZAP
-      - name: Run ZAP API Scan
+      - name: Ejecutar ZAP
         run: |
           REPORT="zap-report-${{ env.TIMESTAMP }}"
           
-          echo "⚡ Iniciando ZAP (Modo Seguro -S)..."
+          echo "⚡ Iniciando ZAP usando el archivo LOCAL..."
           
-          # EXPLICACIÓN DE COMANDOS:
-          # -t : Tu URL pública del JSON
-          # -O : La URL de DefectDojo (Destino)
-          # -z : Le pasa el archivo con el Token
-          # -S : Modo Seguro (Evita que la demo te bloquee)
+          # CAMBIO CLAVE:
+          # -t /zap/wrk/openapi_local.json  <-- Usamos la ruta local, NO la URL de GitHub
+          # -O "$API_BASE"                  <-- Esto fuerza a que los ataques vayan a DefectDojo
           
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
             zaproxy/zap-stable zap-api-scan.py \
-            -t "$OPENAPI_URL" \
+            -t /zap/wrk/openapi_local.json \
             -f openapi \
             -O "$API_BASE" \
             -z "-configfile /zap/wrk/zap_options.prop" \
@@ -81,15 +76,14 @@ jobs:
             -r "$REPORT.html" \
             -J "$REPORT.json" \
             -l WARN \
-            || echo "⚠️ ZAP terminó (Revisar reporte)."
+            || echo "⚠️ ZAP terminó."
 
       - name: Verificar Reporte
         run: |
-          ls -lh ./zap/wrk/
           if [ -f "./zap/wrk/zap-report-${{ env.TIMESTAMP }}.html" ]; then
-             echo "✅ ¡ÉXITO! Reporte generado."
+             echo "✅ REPORTE GENERADO CORRECTAMENTE."
           else
-             echo "❌ Reporte no encontrado. Algo falló en ZAP."
+             echo "❌ Reporte no encontrado."
              exit 1
           fi
 
