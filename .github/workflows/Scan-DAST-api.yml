@@ -1,4 +1,4 @@
-name: DAST Scan (Fix URL & Inject Server)
+name: DAST Scan (Final - Fixed Validation)
 
 on:
   push:
@@ -7,10 +7,7 @@ on:
 
 env:
   DOJO_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
-  
-  # ✅ CORRECCIÓN 1: URL RAW ESTÁNDAR (Sin 'refs/heads')
   OPENAPI_URL: "https://raw.githubusercontent.com/Jneira00001/APIv2_DAST/main/openapi.json"
-  
   API_BASE: "https://demo.defectdojo.org"
 
 jobs:
@@ -26,30 +23,29 @@ jobs:
           chmod 777 ./zap/wrk
           echo "TIMESTAMP=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
 
-      - name: 📥 Descargar y Arreglar JSON
+      - name: 📥 Descargar y Preparar JSON
         run: |
           echo "⬇️ Descargando desde: $OPENAPI_URL"
-          
-          # Descargamos el archivo
           curl -sL "$OPENAPI_URL" -o ./zap/wrk/original.json
           
-          # 🕵️ DEBUG: Mostramos las primeras 10 líneas para ver si es un 404
-          echo "📄 Contenido descargado (Primeras líneas):"
-          head -n 10 ./zap/wrk/original.json
-          
-          # Validamos si es un JSON real
-          if [[ $(head -n 1 ./zap/wrk/original.json) != *"openapi"* ]]; then
-             echo "❌ ERROR: El archivo no parece un OpenAPI válido (Posible 404)."
+          # VALIDACIÓN CORREGIDA:
+          # Usamos 'grep' para buscar "openapi" en el archivo, sin importar en qué línea esté.
+          if grep -q "openapi" ./zap/wrk/original.json; then
+             echo "✅ Archivo OpenAPI válido detectado."
+          else
+             echo "❌ ERROR: El archivo descargado no contiene la palabra 'openapi'."
+             echo "   Contenido (primeras 5 lineas):"
+             head -n 5 ./zap/wrk/original.json
              exit 1
           fi
 
-          echo "🔧 Inyectando servidor base en el JSON..."
-          # ✅ CORRECCIÓN 2: Usamos jq para agregar el bloque 'servers' manualmente.
-          # Esto obliga a ZAP a entender dónde está la API, sin depender del flag -O.
+          echo "🔧 Inyectando servidor base ($API_BASE)..."
+          # Usamos jq para inyectar la URL del servidor dentro del JSON.
+          # Esto es crucial para que ZAP sepa atacar a DefectDojo y no a localhost.
           jq --arg url "$API_BASE" '.servers = [{"url": $url}]' ./zap/wrk/original.json > ./zap/wrk/ready_to_scan.json
           
           chmod 777 ./zap/wrk/ready_to_scan.json
-          echo "✅ JSON parcheado y listo para escanear."
+          echo "✅ JSON listo: ./zap/wrk/ready_to_scan.json"
 
       - name: Configurar Auth ZAP
         run: |
@@ -67,7 +63,10 @@ jobs:
           REPORT="zap-report-${{ env.TIMESTAMP }}"
           echo "⚡ Iniciando ZAP..."
 
-          # Usamos el archivo 'ready_to_scan.json' que ya tiene el servidor inyectado
+          # EXPLICACIÓN:
+          # -t .../ready_to_scan.json : El archivo que YA tiene la URL de DefectDojo inyectada.
+          # -S : Modo Seguro para evitar bloqueos del WAF.
+          
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
             zaproxy/zap-stable zap-api-scan.py \
@@ -81,8 +80,8 @@ jobs:
             || echo "⚠️ ZAP terminó."
 
       - name: Verificar y Subir
-        if: always()
+        if: always() # Se ejecuta siempre para que puedas bajar el reporte
         uses: actions/upload-artifact@v4
         with:
-          name: Reporte-Final-ZAP
+          name: Reporte-ZAP
           path: ./zap/wrk/
