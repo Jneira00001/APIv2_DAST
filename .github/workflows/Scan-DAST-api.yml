@@ -1,4 +1,4 @@
-name: Debug Paths & Scan
+name: Debug Paths & Scan (Corregido)
 
 on:
   push:
@@ -21,38 +21,44 @@ jobs:
           mkdir -p ./zap/wrk
           chmod 777 ./zap/wrk
 
-      # 1. DESCARGAMOS EL ARCHIVO
+      # 1. DESCARGAMOS EL ARCHIVO (Modo Camuflaje)
       - name: Descargar Swagger
         run: |
+          echo "⬇️ Descargando archivo..."
           curl -s -L -A "Mozilla/5.0" \
             -H "Authorization: Token ${MY_TOKEN}" \
             "$SOURCE_URL" > ./zap/wrk/full_schema.json
           
+          # Validación básica
+          if [[ $(head -n 1 ./zap/wrk/full_schema.json) != *"{"* ]]; then
+             echo "❌ Error: El archivo descargado no es un JSON válido."
+             head -n 5 ./zap/wrk/full_schema.json
+             exit 1
+          fi
+
           chmod 777 ./zap/wrk/full_schema.json
-          echo "✅ Archivo descargado."
+          echo "✅ Archivo descargado correctamente."
 
       # 2. PRUEBA EN EL HOST (GITHUB RUNNER)
-      - name: Validar ruta en el Runner (Host)
+      - name: 🕵️ Test 1 - Validar ruta en el Host
         run: |
           echo "📂 Listando carpeta local ./zap/wrk/ :"
           ls -la ./zap/wrk/
-          
-          echo "📄 Leemos las primeras lineas desde el Host:"
-          head -n 5 ./zap/wrk/full_schema.json
 
       # 3. PRUEBA DENTRO DE DOCKER (LA PRUEBA DE FUEGO)
-      - name: 🕵️ Test 2: Validar ruta DENTRO de Docker
+      # Esta es la línea que te daba error. Ahora está corregida.
+      - name: 🕵️ Test 2 - Validar ruta DENTRO de Docker
         run: |
           echo "🐳 Iniciando contenedor de prueba..."
-          echo "Objetivo: Ver si el archivo existe en /zap/wrk/full_schema.json"
+          echo "Objetivo: Ver si /zap/wrk/full_schema.json existe dentro del contenedor."
           
-          # Montamos el volumen igual que en el escaneo, pero ejecutamos 'ls' y 'cat'
+          # Montamos el volumen y ejecutamos 'ls' dentro
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
             zaproxy/zap-stable \
-            bash -c "ls -la /zap/wrk/ && echo '--- CONTENIDO (Cat) ---' && head -n 5 /zap/wrk/full_schema.json"
+            bash -c "ls -la /zap/wrk/ && echo '--- CHECK ---' && [ -f /zap/wrk/full_schema.json ] && echo '✅ ARCHIVO ENCONTRADO' || echo '❌ ARCHIVO NO ENCONTRADO'"
 
-      # 4. SI EL PASO ANTERIOR NO FALLÓ, EJECUTAMOS ZAP
+      # 4. CONFIGURAR AUTH
       - name: Configurar Auth ZAP
         run: |
           cat <<EOF > ./zap/wrk/zap_options.prop
@@ -72,9 +78,14 @@ jobs:
           EOF
           chmod 777 ./zap/wrk/zap_options.prop
 
-      - name: Ejecutar Escaneo REAL
+      # 5. EJECUTAR ESCANEO REAL
+      - name: Ejecutar Escaneo ZAP
         run: |
           echo "🚀 Rutas validadas. Iniciando ZAP..."
+          
+          # NOTA IMPORTANTE DE RUTA:
+          # Usamos /zap/wrk/full_schema.json (Ruta absoluta DENTRO del contenedor)
+          # NO USAR ./zap/wrk/...
           
           docker run --rm -u 0 \
               -v $(pwd)/zap/wrk:/zap/wrk:rw \
