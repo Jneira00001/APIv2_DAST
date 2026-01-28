@@ -73,7 +73,7 @@ jobs:
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
             zaproxy/zap-weekly zap-api-scan.py \
             -t /zap/wrk/schema.json \
-            -f openapi3 \
+            -f openapi \
             -O "https://demo.defectdojo.org" \
             -r /zap/wrk/reporte-defectdojo-${TIMESTAMP}.html \
             -z "-configfile /zap/wrk/zap_options.prop -config api.debug=true" \
