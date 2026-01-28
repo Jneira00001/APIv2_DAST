@@ -30,34 +30,27 @@ jobs:
           replacer.full_list(0).matchstr=Authorization
           replacer.full_list(0).regex=false
           replacer.full_list(0).replacement=Token ${MY_TOKEN}
-
-          replacer.full_list(1).description=AcceptJson
-          replacer.full_list(1).enabled=true
-          replacer.full_list(1).matchtype=REQ_HEADER
-          replacer.full_list(1).matchstr=Accept
-          replacer.full_list(1).regex=false
-          replacer.full_list(1).replacement=application/json
           EOF
-          chmod 644 ./zap/wrk/zap_options.prop
 
-      - name: Descargar Swagger
+      - name: Descargar y Parchear JSON
         run: |
+          # Descargar el esquema original
           curl -s -L \
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36" \
             -H "Authorization: Token ${MY_TOKEN}" \
             "$SOURCE_URL" > ./zap/wrk/schema.json
+          
+          # Inyectar la URL base para que el script de ZAP no encuentre 0 URLs
+          # Este cambio hace que el JSON pase de tener solo rutas a tener Host + Rutas
+          sed -i 's/"openapi":"3.0.3",/"openapi":"3.0.3","servers":[{"url":"https:\/\/demo.defectdojo.org"}],/' ./zap/wrk/schema.json
 
       - name: Ejecutar Escaneo ZAP
         run: |
-          echo "🚀 Iniciando escaneo..."
           TIMESTAMP=$(date +'%Y-%m-%d_%H-%M-%S')
-          
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
             -e JAVA_OPTS="-Xmx5g" \
             zaproxy/zap-stable zap-api-scan.py \
             -t /zap/wrk/schema.json \
             -f openapi \
-            -O "https://demo.defectdojo.org" \
             -r /zap/wrk/reporte-defectdojo-${TIMESTAMP}.html \
-            -z "-configfile /zap/wrk/zap_options.prop -config openapi.importTimeoutInSecs=180 -config openapi.targetHostname=demo.defectdojo.org"
+            -z "-configfile /zap/wrk/zap_options.prop -config openapi.importTimeoutInSecs=180"
