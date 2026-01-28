@@ -1,4 +1,4 @@
-name: DefectDojo Scan (Anti-Bot Fix)
+name: DefectDojo Scan OpenAPI
 
 on:
   push:
@@ -71,7 +71,7 @@ jobs:
 
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
-            zaproxy/zap-stable zap-api-scan.py \
+            zaproxy/zap-weekly zap-api-scan.py \
             -t /zap/wrk/schema.json \
             -f openapi3 \
             -O "https://demo.defectdojo.org" \
