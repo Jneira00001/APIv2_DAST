@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  # ⚠️ En entornos reales esto debe ir en secrets
+  # ⚠️ Nota: En producción usa GitHub Secrets para el Token
   MY_TOKEN: "548afd6fab3bea9794a41b31da0e9404f733e222"
   SOURCE_URL: "https://demo.defectdojo.org/api/v2/oa3/schema/?format=json"
 
@@ -44,39 +44,26 @@ jobs:
 
       - name: Descargar Swagger (Modo Camuflaje)
         run: |
-          echo "⬇️ Descargando OpenAPI con User-Agent real..."
-
+          echo "⬇️ Descargando OpenAPI..."
           curl -s -L \
             -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
             -H "Authorization: Token ${MY_TOKEN}" \
-            "$SOURCE_URL" > full_schema.json
+            "$SOURCE_URL" > ./zap/wrk/schema.json
 
-          echo "🔎 Validando contenido descargado..."
-          head -n 5 full_schema.json
-
-          if [[ $(head -n 1 full_schema.json) != *"{"* ]]; then
-            echo "❌ El archivo descargado no es JSON válido (posible WAF)"
-            exit 1
-          fi
-
-          mv full_schema.json ./zap/wrk/schema.json
-          chmod 644 ./zap/wrk/schema.json
-          echo "✅ OpenAPI descargado correctamente."
-
-      - name: Ejecutar Escaneo ZAP
+      - name: Ejecutar Escaneo ZAP (Solución NoUrlsException + Memoria)
         run: |
-          echo "🚀 Iniciando escaneo ZAP API..."
-
+          echo "🚀 Iniciando escaneo con memoria extendida y timeout largo..."
           TIMESTAMP=$(date +'%Y-%m-%d_%H-%M-%S')
 
           docker run --rm -u 0 \
             -v $(pwd)/zap/wrk:/zap/wrk:rw \
-            zaproxy/zap-weekly zap-api-scan.py \
+            -e JAVA_OPTS="-Xmx4g" \
+            zaproxy/zap-stable zap-api-scan.py \
             -t /zap/wrk/schema.json \
             -f openapi \
             -O "https://demo.defectdojo.org" \
             -r /zap/wrk/reporte-defectdojo-${TIMESTAMP}.html \
-            -z "-configfile /zap/wrk/zap_options.prop -config api.debug=true" \
+            -z "-configfile /zap/wrk/zap_options.prop -config openapi.importTimeoutInSecs=180 -config api.debug=true" \
             2>&1 | tee ./zap/wrk/zap_console.log
 
       - name: Subir Reporte
